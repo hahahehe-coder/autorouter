@@ -1,0 +1,18 @@
+# 构建时排除,减小上下文 + 避免覆盖镜像内产物
+.venv
+web/node_modules
+web/dist
+log
+__pycache__
+**/__pycache__
+*.pyc
+.git
+.gitignore
+.hint.md
+hint.md
+readme2.md
+scripts
+.claude
+Dockerfile
+docker-compose.yml
+.dockerignore

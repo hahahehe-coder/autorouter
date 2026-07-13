@@ -1,0 +1,23 @@
+fast:
+  kind: static
+  rule:
+    model: MiniMax-M3
+    inference:
+      max_tokens: 1024
+expert:
+  kind: static
+  rule:
+    model: claude-opus-4.8
+    inference:
+      reasoning_effort: high
+auto:
+  kind: heuristic
+  rules:
+  - model: MiniMax-M3
+  - model: glm-5.2
+  - model: deepseek-pro
+    inference:
+      reasoning_effort: medium
+  - model: claude-opus-4.8
+    inference:
+      reasoning_effort: high

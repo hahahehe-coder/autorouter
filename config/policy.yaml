@@ -1,0 +1,6 @@
+anti_downgrade:
+  enabled: true
+  window_seconds: 600
+complaint_upgrade:
+  enabled: true
+  max_chars: 160
