@@ -50,7 +50,7 @@
   {:else if preview}
     <div class="test-out has-result">
 策略     <code>{preview.strategy}</code>
-路由源   <code>{preview.source}</code>{#if preview.band} ({preview.band}){/if}
+路由源   <code style="color: {preview.source === 'ml' ? 'var(--accent)' : 'inherit'};">{preview.source}</code>{#if preview.band} ({preview.band}){/if}
 档位     <code>{preview.rule_idx}</code>
 模型     <code>{preview.model}</code>
 置信度   <code>{(preview.confidence ?? 0).toFixed(2)}</code>

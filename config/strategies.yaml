@@ -1,23 +1,32 @@
 fast:
-  kind: static
+  kind: single
   rule:
     model: MiniMax-M3
-    max_tokens: 4096
 expert:
-  kind: static
+  kind: single
   rule:
     model: glm-5.2
-    max_tokens: 16000
+heuristic_test:
+  # 压测 / 调试用:kind=rule 纯 heuristic 路由,不带 ML 不带 confidence_gate。
+  # 测试时方便按 chars/code 分布精准预测每条 query 去哪档。
+  kind: rule
+  rules:
+  - model: MiniMax-M3
+    max_tokens: 4096
+    thinking: off
+  - model: MiniMax-M3
+  - model: kimi-for-coding
+    thinking: medium
+  - model: glm-5.2
+    thinking: high
 auto:
-  kind: heuristic
+  kind: classifier
   rules:
   - model: MiniMax-M3
     max_tokens: 4096
     thinking: 'off'
-  - model: glm-5.1
-  - model: glm-5.2
-    system: 你是一个资深程序员。优先给出可运行的代码,简短说明。
+  - model: MiniMax-M3
+  - model: kimi-for-coding
     thinking: medium
   - model: glm-5.2
-    system: 你是严谨的助理。对复杂问题展开深入推理。
     thinking: high

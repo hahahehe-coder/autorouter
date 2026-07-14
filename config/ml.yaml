@@ -1,0 +1,18 @@
+# ML 路由(可选)— 加载 OpenSquilla 预训练 bundle(LightGBM + BGE/ONNX)。
+# enabled 默认 true,但依赖(ml extra)或 bundle 缺失时自动降级到启发式,不会崩溃。
+# 启用 ML 需先装依赖:uv sync --extra ml(无 torch)。
+
+enabled: true
+
+# OpenSquilla v4.2 phase3 bundle 目录(含 lgbm_main.bin + features/ + bge_onnx/ + runtime_src/)。
+# 已拷进项目:models/v4.2_phase3_inference(相对路径,按项目根解析)。
+bundle_path: models/v4.2_phase3_inference
+
+# 置信度门:ML 给出的 max 概率低于此值时,回退到 confidence_fallback_idx 指定的档位。
+confidence_threshold: 0.5
+
+# 低置信度回退档位。-1 = rules_count-1(最强档,模型不确定就给最强);否则用字面 idx。
+confidence_fallback_idx: -1
+
+# 加载时用 dummy 请求跑一次 predict,触发 BGE 懒加载(消除首请求延迟 + 避免并发竞态)。
+warmup_on_load: true

@@ -6,12 +6,17 @@
 
   export let snapshot: ConfigSnapshot;
   export let dirty = false;
-  export let upstreamModels: string[] = [];
+  export let models: string[] = [];   // 注册表里的模型名(给 ModelSelect 用)
 
   export let onChange: () => void = () => {};
 
   let showAddStrategy = false;
   let newStrategyName = '';
+
+  // 注册表为空时不允许新增策略(rule.model 必须从注册表选)
+  $: registryEmpty = models.length === 0;
+  // 默认 rule.model 用注册表首个(避免出现空 model)
+  $: defaultModel = models[0] ?? '';
 
   // classifier 输出下标 → 人类标签(给 UI 显示用)
   const CLASSIFIER_LABELS = ['0 trivial', '1 medium', '2 code', '3 heavy'];
@@ -22,9 +27,14 @@
       if (snapshot.strategies[name]) alert('策略名已存在');
       return;
     }
+    if (registryEmpty) {
+      alert('注册表为空,请先在「模型」tab 拉取/添加模型');
+      return;
+    }
+    const rule = { model: defaultModel };
     snapshot.strategies[name] = {
-      kind: 'heuristic',
-      rules: [{ model: '' }, { model: '' }, { model: '' }, { model: '' }],
+      kind: 'single',
+      rule,
     };
     newStrategyName = '';
     showAddStrategy = false;
@@ -46,20 +56,20 @@
     delete snapshot.strategies[name];
     snapshot = snapshot; onChange();
   }
-  function changeKind(name: string, kind: 'static' | 'heuristic') {
+  function changeKind(name: string, kind: 'single' | 'rule' | 'classifier') {
     const s = snapshot.strategies[name];
     s.kind = kind;                                   // 必须写,模板靠它切分支
-    if (kind === 'static') {
-      s.rule = { model: '' };
+    if (kind === 'single') {
+      if (!s.rule || !s.rule.model) s.rule = { model: defaultModel };
       delete s.rules;
     } else {
-      s.rules = (s.rules && s.rules.length >= 2) ? s.rules : [{ model: '' }, { model: '' }];
+      s.rules = (s.rules && s.rules.length >= 2) ? s.rules : [{ model: defaultModel }, { model: defaultModel }];
       delete s.rule;
     }
     snapshot = snapshot; onChange();
   }
   function onKindSelect(name: string) {
-    return (e: Event) => changeKind(name, selVal(e) as 'static' | 'heuristic');
+    return (e: Event) => changeKind(name, selVal(e) as 'single' | 'rule' | 'classifier');
   }
 
   // --- static rule ---
@@ -114,7 +124,8 @@
     onRuleFieldInput(name, idx, 'thinking', (e.target as HTMLInputElement).value);
   }
   function addRule(name: string) {
-    snapshot.strategies[name].rules!.push({ model: '' });
+    if (registryEmpty) return;
+    snapshot.strategies[name].rules!.push({ model: defaultModel });
     snapshot = snapshot; onChange();
   }
   function removeRule(name: string, idx: number) {
@@ -150,7 +161,10 @@
   <div class="card-head">
     <h2>策略列表 <span class="meta">{names.length} 个</span></h2>
     {#if !showAddStrategy}
-      <button class="btn btn-secondary" on:click={() => showAddStrategy = true}>+ 新增策略</button>
+      <button class="btn btn-secondary" on:click={() => showAddStrategy = true}
+        disabled={registryEmpty} title={registryEmpty ? '请先在「模型」tab 注册模型' : ''}>
+        + 新增策略
+      </button>
     {:else}
       <span style="display: flex; gap: 6px; align-items: center;">
         <input class="mono" type="text" placeholder="策略名(英文)" bind:value={newStrategyName}
@@ -174,8 +188,9 @@
           <div class="field">
             <label class="field-label">路由模式</label>
             <select on:change={onKindSelect(n)}>
-              <option value="static" selected={snapshot.strategies[n].kind === 'static'}>static — 单一模型</option>
-              <option value="heuristic" selected={snapshot.strategies[n].kind === 'heuristic'}>heuristic — 按难度分档</option>
+              <option value="single"     selected={snapshot.strategies[n].kind === 'single'}>single — 单模型</option>
+              <option value="rule"       selected={snapshot.strategies[n].kind === 'rule'}>rule — 基于规则(启发式 band)</option>
+              <option value="classifier" selected={snapshot.strategies[n].kind === 'classifier'}>classifier — 基于分类器(ML;不可用回退 rule)</option>
             </select>
           </div>
           <div></div>
@@ -184,10 +199,10 @@
           </div>
         </div>
 
-        {#if snapshot.strategies[n].kind === 'static'}
+        {#if snapshot.strategies[n].kind === 'single'}
           <div class="field">
             <label class="field-label">模型</label>
-            <ModelSelect value={snapshot.strategies[n].rule?.model ?? ''} {upstreamModels}
+            <ModelSelect value={snapshot.strategies[n].rule?.model ?? ''} {models}
               on:change={(e) => setStaticModel(n, e)} />
           </div>
           <div class="field-row">
@@ -235,7 +250,7 @@
 
               <div class="field">
                 <label class="field-label">模型</label>
-                <ModelSelect value={r.model ?? ''} {upstreamModels} on:change={(e) => onRuleModelInput(n, i, e)} />
+                <ModelSelect value={r.model ?? ''} {models} on:change={(e) => onRuleModelInput(n, i, e)} />
               </div>
 
               <div class="field-row">

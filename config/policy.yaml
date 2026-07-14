@@ -4,3 +4,17 @@ anti_downgrade:
 complaint_upgrade:
   enabled: true
   max_chars: 160
+chitchat_only:
+  # R0 只留给真闲聊(招呼/自我介绍/天气/客套),其他从 R0 升 R1,
+  # 避免"短但有点内容"被 thinking=off 的 R0 吃瘪。
+  enabled: true
+capability_gate:
+  # 含图片/上下文超窗时往上找能用的档。需在「策略」tab 的 rule 上标 supports_vision/context_window;
+  # 不标就 no-op(未知不动)。
+  enabled: true
+large_context_floor:
+  enabled: true
+  t3_floor_tokens: 150000   # ≥15 万 token → 强制顶档
+  t2_floor_tokens: 80000    # ≥8 万 token → 强制次高档
+  t3_context_ratio: 0.8     # 或 material ≥ ratio*context_window → 顶档
+  context_window: 262000    # 对齐最小 context(kimi-262k),ratio=0.8 → 21 万 token 警告

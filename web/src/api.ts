@@ -10,15 +10,43 @@ export interface RuleData {
   thinking?: string;        // effort 字符串(各端点映射见 channel._apply_field)
 }
 export interface StrategyData {
-  kind: 'static' | 'heuristic';
-  rule?: RuleData;                 // static
-  rules?: RuleData[];             // heuristic
+  kind: 'static' | 'heuristic' | 'single' | 'rule' | 'classifier';
+  rule?: RuleData;                 // single
+  rules?: RuleData[];             // rule / classifier
+}
+export interface ModelEntry {
+  supports_vision?: boolean | null;  // null=未知(capability_gate 不动)
+  context_window?: number;
+}
+export interface MLCfg {
+  enabled: boolean;
+  bundle_path: string;
+  confidence_threshold: number;
+  confidence_fallback_idx: number;
+  warmup_on_load?: boolean;
+}
+export interface ObservabilityCfg {
+  log_dir: string;
+}
+export interface LogFile {
+  name: string;
+  size: number;
+  mtime: number;
+  is_today: boolean;
+}
+export interface LogContent {
+  name: string;
+  content: string;
+  total_lines: number;
+  size: number;
 }
 export interface ConfigSnapshot {
   connection: any;
   policy: any;
   strategies: Record<string, StrategyData>;
-  observability: any;
+  observability: ObservabilityCfg;
+  ml: MLCfg;
+  models: Record<string, ModelEntry>;
 }
 
 export interface RoutingPreview {
@@ -51,6 +79,8 @@ export const api = {
     })),
   reload:        () => json<{ ok: boolean }>(fetch(`${BASE}/api/reload`, { method: 'POST' })),
   upstreamModels: () => json<string[]>(fetch(`${BASE}/api/models`)),
+  listLogs:      () => json<{files: LogFile[]; log_dir: string}>(fetch(`${BASE}/api/logs`)),
+  readLog:       (name: string) => json<LogContent>(fetch(`${BASE}/api/logs/${encodeURIComponent(name)}`)),
   preview:       (strategy: string, query: string) => json<RoutingPreview>(
     fetch(`${BASE}/api/route/preview`, {
       method: 'POST',

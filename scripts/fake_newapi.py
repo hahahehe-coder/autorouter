@@ -16,12 +16,15 @@ async def list_models():
     return {
         "object": "list",
         "data": [
-            {"id": "gpt-4o", "object": "model"},
-            {"id": "gpt-4o-mini", "object": "model"},
+            {"id": "MiniMax-M2.7", "object": "model"},
+            {"id": "MiniMax-M2.7-highspeed", "object": "model"},
             {"id": "MiniMax-M3", "object": "model"},
+            {"id": "glm-4.7-flash", "object": "model"},
+            {"id": "glm-5.1", "object": "model"},
             {"id": "glm-5.2", "object": "model"},
-            {"id": "Qwen-Turbo", "object": "model"},
-            {"id": "deepseek-chat", "object": "model"},
+            {"id": "kimi-for-coding", "object": "model"},
+            {"id": "kimi-k2.6", "object": "model"},
+            {"id": "kimi-k2.7-code", "object": "model"},
         ]
     }
 

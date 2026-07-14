@@ -6,21 +6,29 @@ FastAPI 入口 — 代理本体 + 管理 API。
 """
 from __future__ import annotations
 
+import asyncio
+import atexit
 import logging
+import logging.handlers as logging_handlers
 import os
+import re
+from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from queue import Queue
 from typing import AsyncGenerator
 
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import config as config_mod
+from . import ml_router
 from .observe import Observer
 from .router import route
 from .session import SessionStore, compute_session_key
 
-# 日志
+# 日志(先 basicConfig 撑早期 import,等 _CFG 加载后再挂 file handler)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -35,18 +43,154 @@ def _config_dir() -> Path:
     return Path(os.getenv("CONFIG_DIR", "config"))
 
 
+# 日志文件名白名单(防路径穿越 + 适配按天命名)
+_LOG_NAME_RE = re.compile(r"^auto_router-\d{4}-\d{2}-\d{2}\.log$")
+
+
+class DailyFileHandler(logging.Handler):
+    """按本地日期切文件:每天一个 `auto_router-YYYY-MM-DD.log`,append,从不删除。
+
+    行为:
+    - 每次 emit 检查今天日期;如果跨日则关旧文件开新一天的(懒切,无后台线程)。
+    - 文件名格式 auto_router-YYYY-MM-DD.log(自定 base 可改)。
+    - 不主动清理历史 —— 全量保留。
+    - reload 时通过外面 _setup_file_logging 重新装一个新的 instance,旧 instance 在 close 时关 fp。
+    """
+
+    def __init__(self, log_dir: str, base_name: str = "auto_router"):
+        super().__init__()
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.base_name = base_name
+        self._date: str | None = None
+        self._fp = None
+        self.setFormatter(logging.Formatter(
+            fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+
+    def _today(self) -> str:
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _path_for(self, date_str: str) -> Path:
+        return self.log_dir / f"{self.base_name}-{date_str}.log"
+
+    def _ensure_open(self):
+        today = self._today()
+        if self._date != today:
+            if self._fp is not None:
+                try:
+                    self._fp.close()
+                except Exception:
+                    pass
+            self._date = today
+            self._fp = self._path_for(today).open("a", encoding="utf-8")
+
+    def emit(self, record):
+        try:
+            self._ensure_open()
+            msg = self.format(record) + "\n"
+            self._fp.write(msg)
+            self._fp.flush()
+        except Exception:
+            self.handleError(record)
+
+    def close(self):
+        if self._fp is not None:
+            try:
+                self._fp.flush()
+            except Exception:
+                pass
+            try:
+                self._fp.close()
+            except Exception:
+                pass
+            finally:
+                self._fp = None
+        super().close()
+
+
+def _setup_file_logging(log_dir: str) -> None:
+    """装异步日志:emit → QueueHandler → 后台线程的 DailyFileHandler → 文件。
+
+    解决了"app 线程被文件 I/O 同步阻塞"的问题。每个进程(uvicorn worker)各自有
+    自己的 queue + listener;worker 之间仍共享同一个 log 文件,每个 listener 在自己
+    进程内单线程串行 append,无锁竞争。
+    """
+    global _LOG_LISTENER, _LOG_QUEUE, _ATEXIT_REGISTERED
+
+    # 卸掉旧的(支持 reload 时切 log_dir)
+    if _LOG_LISTENER is not None:
+        try:
+            _LOG_LISTENER.stop()
+        except Exception:
+            pass
+        _LOG_LISTENER = None
+
+    root = logging.getLogger()
+    # 卸掉旧的 QueueHandler(避免 reload 堆叠)
+    for h in list(root.handlers):
+        if isinstance(h, logging_handlers.QueueHandler):
+            root.removeHandler(h)
+
+    # 后台线程专写的 file handler
+    file_handler = DailyFileHandler(log_dir)
+    file_handler.setLevel(logging.INFO)
+
+    # 队列 + 后台 listener
+    _LOG_QUEUE = Queue(-1)   # unbounded
+    queue_handler = logging_handlers.QueueHandler(_LOG_QUEUE)
+    queue_handler.setLevel(logging.INFO)
+    root.addHandler(queue_handler)
+
+    _LOG_LISTENER = logging_handlers.QueueListener(_LOG_QUEUE, file_handler)
+    _LOG_LISTENER.start()
+    # 每个进程(worker)只注册一次 atexit
+    if not _ATEXIT_REGISTERED:
+        atexit.register(_shutdown_log_listener)
+        _ATEXIT_REGISTERED = True
+
+
+def _shutdown_log_listener():
+    global _LOG_LISTENER
+    if _LOG_LISTENER is not None:
+        try:
+            _LOG_LISTENER.stop()
+        except Exception:
+            pass
+        _LOG_LISTENER = None
+
+
+# 模块级异步日志状态(每 worker 进程独立)
+_LOG_QUEUE: Queue | None = None
+_LOG_LISTENER: logging_handlers.QueueListener | None = None
+_ATEXIT_REGISTERED: bool = False
+
+
 # mutable containers — reload_config() 原地更新
 _CFG: config_mod.Config = config_mod.load_all(_config_dir())
-_OBSERVER: Observer = Observer(_CFG.observability)
+_setup_file_logging(_CFG.observability.log_dir)
+_OBSERVER: Observer = Observer()
 _SESSIONS: SessionStore = SessionStore(default_window_seconds=_CFG.policy.anti_downgrade_window_seconds)
+# 启动即加载 ML(bundle/依赖缺失会自动降级,不抛、不阻塞启动)
+try:
+    ml_router.configure(_CFG.ml)
+except Exception as e:
+    logger.warning(f"ML configure at boot failed (will degrade to heuristic): {e}")
 
 
 def reload_config() -> None:
-    """从 YAML 重新加载。原地更新 _CFG,重建 observer。"""
+    """从 YAML 重新加载。原地更新 _CFG,重建 observer,重配 ML。"""
     global _CFG, _OBSERVER
     _CFG = config_mod.load_all(_config_dir())
-    _OBSERVER = Observer(_CFG.observability)
+    _setup_file_logging(_CFG.observability.log_dir)
+    _OBSERVER = Observer()
     logger.info(f"Reloaded. {len(_CFG.strategies.items)} strategies")
+    # ML 重配 —— 失败不能拖垮代理(ML 挂了会自动降级启发式)
+    try:
+        ml_router.configure(_CFG.ml)
+    except Exception as e:
+        logger.warning(f"ML reconfigure failed (will degrade to heuristic): {e}")
 
 
 # 模块级常量来自 _CFG(每次请求用最新的)
@@ -75,7 +219,7 @@ def _upstream_headers(req: Request) -> dict:
 
 # ============================ endpoint dispatch ============================
 
-EP_CHAT, EP_MESSAGES, EP_RESPONSES = "chat", "messages", "responses"
+EP_CHAT, EP_MESSAGES, EP_RESPONSES = "chat/completions", "messages", "responses"
 
 
 def _endpoint_user_text(endpoint: str, body: dict) -> str:
@@ -170,6 +314,7 @@ async def health():
         "strategies": list(_CFG.strategies.items.keys()),
         "sessions": _SESSIONS.size(),
         "new_api_base": _new_api_base(),
+        "ml": ml_router.status(),
     }
 
 
@@ -200,9 +345,11 @@ async def _route_and_forward(endpoint: str, request: Request):
     session_key = compute_session_key(headers.get("Authorization", ""), messages)
     prev_idx = _SESSIONS.get_previous_idx(session_key, _CFG.policy.anti_downgrade_window_seconds)
 
-    decision = route(want_model, body, _CFG,
-                     messages=messages, session_key=session_key,
-                     prev_idx=prev_idx)
+    # ML 推理是 CPU 密集(~50-200ms),放线程池避免阻塞事件循环(启发式廉价,同步也无妨,统一走 to_thread)
+    decision = await asyncio.to_thread(
+        route, want_model, body, _CFG,
+        messages=messages, session_key=session_key, prev_idx=prev_idx,
+    )
 
     if decision.rule_idx >= 0:
         _SESSIONS.record(session_key, decision.rule_idx)
@@ -337,7 +484,9 @@ async def route_preview(request: Request):
     text = req.get("query") or ""
     messages = req.get("messages") or [{"role": "user", "content": text}]
     body = {"model": strategy, "messages": messages}
-    decision = route(strategy, body, _CFG, messages=messages, session_key="preview")
+    decision = await asyncio.to_thread(
+        route, strategy, body, _CFG, messages=messages, session_key="preview"
+    )
     return {
         "strategy": decision.strategy,
         "rule_idx": decision.rule_idx,
@@ -372,6 +521,49 @@ async def pull_upstream_models():
         return JSONResponse({"error": str(e)}, 502)
 
 
+# ============================ 日志查看 API ============================
+
+@app.get("/api/logs")
+async def list_logs():
+    """列出 log_dir 下的 auto_router-YYYY-MM-DD.log(按天)。"""
+    log_dir = Path(_CFG.observability.log_dir)
+    files = []
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if log_dir.exists():
+        for f in sorted(log_dir.glob("auto_router-*.log"), reverse=True):
+            if not f.is_file():
+                continue
+            st = f.stat()
+            # 文件名: auto_router-YYYY-MM-DD.log → 抽 YYYY-MM-DD 段判断 is_today
+            stem = f.stem  # "auto_router-2026-07-14"
+            tail = stem.split("-", 1)[1] if "-" in stem else ""
+            files.append({
+                "name": f.name,
+                "size": st.st_size,
+                "mtime": int(st.st_mtime),
+                "is_today": tail == today_str,
+            })
+    return {"files": files, "log_dir": str(log_dir.resolve())}
+
+
+@app.get("/api/logs/{name}")
+async def read_log(name: str):
+    """读日志文件全部内容(不限制行数 — 全量显示)。"""
+    if not _LOG_NAME_RE.match(name):
+        raise HTTPException(403, "invalid log filename")
+    log_dir = Path(_CFG.observability.log_dir)
+    path = (log_dir / name).resolve()
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "log file not found")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return {
+        "name": name,
+        "content": text,
+        "total_lines": text.count("\n"),
+        "size": path.stat().st_size,
+    }
+
+
 # ============================ helpers(序列化/反序列化) ============================
 
 def _serialize(cfg: config_mod.Config) -> dict:
@@ -393,19 +585,40 @@ def _serialize(cfg: config_mod.Config) -> dict:
         "policy": {
             "anti_downgrade":     {"enabled": cfg.policy.anti_downgrade_enabled, "window_seconds": cfg.policy.anti_downgrade_window_seconds},
             "complaint_upgrade":  {"enabled": cfg.policy.complaint_upgrade_enabled, "max_chars": cfg.policy.complaint_max_chars},
+            "chitchat_only":      {"enabled": cfg.policy.chitchat_only_enabled},
+            "capability_gate":    {"enabled": cfg.policy.capability_gate_enabled},
+            "large_context_floor": {
+                "enabled": cfg.policy.large_context_floor_enabled,
+                "t3_floor_tokens": cfg.policy.lc_t3_floor_tokens,
+                "t2_floor_tokens": cfg.policy.lc_t2_floor_tokens,
+                "t3_context_ratio": cfg.policy.lc_t3_context_ratio,
+                "context_window": cfg.policy.lc_context_window,
+            },
         },
         "strategies": {
             n: (
-                {"kind": "static", "rule": rule_to_dict(s.rule)}
-                if s.kind == "static"
-                else {"kind": "heuristic", "rules": [rule_to_dict(r) for r in s.rules]}
+                {"kind": "single", "rule": rule_to_dict(s.rule)}
+                if s.kind == "single"
+                else {"kind": s.kind, "rules": [rule_to_dict(r) for r in s.rules]}
             )
             for n, s in cfg.strategies.items.items()
         },
         "observability": {
-            "decision_log": cfg.observability.decision_log,
-            "jsonl_path": cfg.observability.jsonl_path,
-            "log_preview_chars": cfg.observability.log_preview_chars,
+            "log_dir": cfg.observability.log_dir,
+        },
+        "ml": {
+            "enabled": cfg.ml.enabled,
+            "bundle_path": cfg.ml.bundle_path,
+            "confidence_threshold": cfg.ml.confidence_threshold,
+            "confidence_fallback_idx": cfg.ml.confidence_fallback_idx,
+            "warmup_on_load": cfg.ml.warmup_on_load,
+        },
+        "models": {
+            n: {
+                "supports_vision": m.supports_vision,
+                "context_window": m.context_window,
+            }
+            for n, m in cfg.models.items.items()
         },
     }
 

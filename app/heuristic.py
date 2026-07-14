@@ -51,30 +51,34 @@ def classify(text: str) -> tuple[int, str, float]:
     return 1, "medium", BORDERLINE
 
 
-def classify_with_messages(text: str, messages: list | None) -> tuple[int, str, float, int]:
+def context_signals(messages: list | None) -> tuple[int, bool]:
+    """从 messages 算 (material_tokens 粗估, has_image)。
+    给 large_context_floor / capability_gate 用 —— 无论 ML 还是启发式路径都调这个。"""
+    full = ""
+    for m in (messages or []):
+        c = m.get("content", "") if isinstance(m, dict) else ""
+        if isinstance(c, str):
+            full += "\n" + c
+    zh = sum(1 for ch in full if "一" <= ch <= "鿿")
+    en = sum(1 for ch in full if ch.isascii() and ch.isalpha())
+    material_tokens = int(zh / 1.5 + en / 0.75)
+    has_image = False
+    for m in (messages or []):
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    has_image = True
+                    break
+    return material_tokens, has_image
+
+
+def classify_with_messages(text: str, messages: list | None) -> tuple[int, str, float, int, bool]:
     """
     扩展版:除文本外,还返回:
       - material_tokens:粗估整个 messages 的 token 数
       - has_image:消息里是否有图片
     """
     idx, band, conf = classify(text)
-    # material_tokens
-    full = text
-    if messages:
-        for m in messages:
-            c = m.get("content", "")
-            if isinstance(c, str):
-                full += "\n" + c
-    zh = sum(1 for c in full if "一" <= c <= "鿿")
-    en = sum(1 for c in full if c.isascii() and c.isalpha())
-    material_tokens = int(zh / 1.5 + en / 0.75)
-    # has_image
-    has_image = False
-    for m in (messages or []):
-        c = m.get("content")
-        if isinstance(c, list):
-            for part in c:
-                if isinstance(part, dict) and part.get("type") == "image_url":
-                    has_image = True
-                    break
+    material_tokens, has_image = context_signals(messages)
     return idx, band, conf, material_tokens, has_image

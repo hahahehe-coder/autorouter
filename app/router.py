@@ -14,9 +14,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import ml_router
 from .config import Config, StrategyCfg, RuleCfg
 from .features import extract as extract_features, _last_user_text
-from .heuristic import classify_with_messages
+from .heuristic import classify_with_messages, context_signals
 from .policy import POLICY_ORDER, PolicyCtx, PolicyStep, run_pipeline
 
 logger = logging.getLogger("autorouter.router")
@@ -82,21 +83,52 @@ def _route_static(strategy: StrategyCfg) -> RoutingDecision:
     )
 
 
-def _route_heuristic(strategy: StrategyCfg, body: dict, messages: list,
-                     cfg: Config, session_key: str,
-                     prev_idx: int | None = None) -> RoutingDecision:
+def _route_bands(strategy: StrategyCfg, body: dict, messages: list,
+                 cfg: Config, session_key: str,
+                 prev_idx: int | None = None, *,
+                 use_ml: bool = False) -> RoutingDecision:
+    """rule / classifier 策略:分类成 idx 0-3 → rules[idx] + policy 链。
+    use_ml=False(rule) → 启发式 band;use_ml=True(classifier) → ML,不可用回退启发式。"""
     text = _last_user_text_from_messages(messages)
-    idx, band, conf, material_tokens, has_image = classify_with_messages(text, messages)
+
+    source = "heuristic"
+    if use_ml:
+        # ML 可用先走 ML;推理出错 ml_router.classify 返回 None → 自动回退启发式
+        ml_result = ml_router.classify(text, messages) if ml_router.is_available() else None
+        if ml_result is not None:
+            idx, band, conf, _, _ = ml_result
+            source = "ml"
+        else:
+            idx, band, conf, _, _ = classify_with_messages(text, messages)
+    else:
+        idx, band, conf, _, _ = classify_with_messages(text, messages)
+
+    # 上下文信号(material_tokens/has_image)无论 ML 还是启发式都算一次,给 lc/capability 用
+    material_tokens, has_image = context_signals(messages)
 
     enabled = {
-        "confidence_gate":    True,
-        "complaint_upgrade":  cfg.policy.complaint_upgrade_enabled,
-        "anti_downgrade":     cfg.policy.anti_downgrade_enabled,
+        "confidence_gate":     True,
+        "chitchat_only":       cfg.policy.chitchat_only_enabled,
+        "complaint_upgrade":   cfg.policy.complaint_upgrade_enabled,
+        "anti_downgrade":      cfg.policy.anti_downgrade_enabled,
+        "capability_gate":     cfg.policy.capability_gate_enabled,
+        "large_context_floor": cfg.policy.large_context_floor_enabled,
     }
     ctx = PolicyCtx(
         rules_count=len(strategy.rules),
         previous_idx=prev_idx,
         message_text=text,
+        confidence=conf,
+        confidence_threshold=cfg.ml.confidence_threshold,
+        confidence_fallback_idx=cfg.ml.confidence_fallback_idx,
+        rules=strategy.rules,
+        material_tokens=material_tokens,
+        has_image=has_image,
+        model_caps=cfg.models.items,
+        lc_t3_floor=cfg.policy.lc_t3_floor_tokens,
+        lc_t2_floor=cfg.policy.lc_t2_floor_tokens,
+        lc_t3_ratio=cfg.policy.lc_t3_context_ratio,
+        lc_context_window=cfg.policy.lc_context_window,
     )
     steps, final_idx = run_pipeline(idx, ctx, enabled)
 
@@ -110,7 +142,7 @@ def _route_heuristic(strategy: StrategyCfg, body: dict, messages: list,
         rule_count=len(strategy.rules),
         model=rule.model,
         confidence=conf,
-        source="heuristic",
+        source=source,
         band=band,
         session_key=session_key,
         fields=_rule_fields(rule),
@@ -137,8 +169,9 @@ def route(strategy_name: str, body: dict, cfg: Config, *,
         )
 
     kind = strat.kind
-    if kind == "static":
+    if kind == "single":
         return _route_static(strat)
-    if kind == "heuristic":
-        return _route_heuristic(strat, body, messages, cfg, session_key, prev_idx=prev_idx)
+    if kind in ("rule", "classifier"):
+        return _route_bands(strat, body, messages, cfg, session_key,
+                            prev_idx=prev_idx, use_ml=(kind == "classifier"))
     raise ValueError(f"unknown strategy.kind '{kind}' for '{strategy_name}'")

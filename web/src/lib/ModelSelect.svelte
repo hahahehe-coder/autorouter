@@ -1,97 +1,51 @@
 <script lang="ts">
   /*
-    模型选择器。
-    - 上游模型已加载: <select> 下拉,带"自定义..."选项
-    - 选自定义: 弹文本输入
-    - 上游模型未加载: 直接文本输入
-    父组件:value= 传当前值,on:change={(e)=>...} 接收新值(e.detail 是模型名)。
+    模型选择器 — 严格锁定到「模型配置」页注册表里的模型:
+    - 注册表为空:提示去「模型」tab 拉取/添加
+    - 只能从下拉里选(无自定义输入、无空选项)
+    - 当前 value 不在注册表(被删除/未注册):标红 + 提示
+    父组件:models= 传注册表模型名数组,on:change={(e)=>...} 接收新值(e.detail)。
   */
   import { createEventDispatcher } from 'svelte';
   export let value: string = '';
-  export let upstreamModels: string[] = [];
+  export let models: string[] = [];
   const dispatch = createEventDispatcher();
 
-  let customMode = false;
-  let customText = '';
-  let isInUpstream = (m: string) => upstreamModels.includes(m);
-
-  // 初次 + 每次 upstreamModels 变化时:如果 value 不在列表里,自动切自定义
-  $: {
-    if (upstreamModels.length > 0 && value && !isInUpstream(value)) {
-      customMode = true;
-      customText = value;
-    }
-    if (upstreamModels.length === 0) {
-      customMode = false;   // 没上游模型就纯文本输入,别卡自定义模式
-    }
-  }
+  let isInRegistry = (m: string) => m !== '' && models.includes(m);
+  $: valid = isInRegistry(value);
 
   function onSelect(e: Event) {
     const v = (e.target as HTMLSelectElement).value;
-    if (v === '__custom__') {
-      customMode = true;
-      customText = value;
-      queueMicrotask(focusCustomInput);
-    } else {
-      customMode = false;
-      value = v;
-      dispatch('change', v);
-    }
+    if (!v || v === value) return;
+    value = v;
+    dispatch('change', v);
   }
-
-  function onCustomInput(e: Event) {
-    customText = (e.target as HTMLInputElement).value;
-    value = customText;
-    dispatch('change', customText);
-  }
-
-  function backToSelect() {
-    customMode = false;
-    customText = '';
-    value = '';
-    dispatch('change', '');
-  }
-
-  function onPlainInput(e: Event) {
-    value = (e.target as HTMLInputElement).value;
-    dispatch('change', value);
-  }
-
-  function focusCustomInput() {
-    const el = document.querySelector('.model-custom-input') as HTMLInputElement | null;
-    if (el) { el.focus(); el.select(); }
-  }
-
-  const uid = Math.random().toString(36).slice(2, 9);
 </script>
 
-{#if upstreamModels.length === 0}
-  <input class="mono" type="text" {value} placeholder="未拉取上游(点顶栏按钮)" on:input={onPlainInput} />
-{:else if !customMode}
-  <select class="mono" {value} on:change={onSelect}>
-    <option value="">— 选模型 —</option>
-    {#each upstreamModels as m}
-      <option value={m}>{m}</option>
-    {/each}
-    <option value="__custom__">自定义…</option>
-  </select>
+{#if models.length === 0}
+  <span class="hint-warn">注册表为空 — 先去「模型」tab 拉取或添加模型</span>
 {:else}
-  <div style="display: flex; gap: 6px;">
-    <input class="mono model-custom-input" type="text" bind:value={customText} placeholder="输入模型名" on:input={onCustomInput} />
-    <button class="btn-x" on:click={backToSelect} title="回到下拉">×</button>
+  <div class="wrap">
+    <select class="mono" class:bad={value !== '' && !valid}
+      value={valid ? value : ''}
+      on:change={onSelect}>
+      {#if !valid}
+        <option value="" disabled selected>— 请选择模型 —</option>
+      {/if}
+      {#each models as m (m)}
+        <option value={m} selected={m === value}>{m}</option>
+      {/each}
+    </select>
+    {#if value !== '' && !valid}
+      <span class="bad-hint">未注册,请重选</span>
+    {/if}
   </div>
 {/if}
 
 <style>
-  select.mono, input.mono { font-family: var(--font-mono); font-size: 13px; }
-  .btn-x {
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    cursor: pointer;
-    color: var(--ink-3);
-    padding: 0 10px;
-    font-size: 14px;
-  }
-  .btn-x:hover { color: var(--danger); border-color: var(--danger-soft); }
+  select.mono { font-family: var(--font-mono); font-size: 13px; min-width: 200px; }
+  select.mono.bad { border-color: var(--danger); background: var(--danger-soft); }
+  .wrap { display: inline-flex; align-items: center; gap: 8px; }
+  .bad-hint { color: var(--danger); font-size: 12px; }
+  .hint-warn { color: var(--ink-3); font-size: 12px; font-style: italic; }
 </style>

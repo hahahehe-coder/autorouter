@@ -1,0 +1,27 @@
+glm-4.7-flash:
+  supports_vision: false
+  context_window: 200000
+glm-5.1:
+  supports_vision: false
+  context_window: 200000
+glm-5.2:
+  supports_vision: true
+  context_window: 1000000
+kimi-for-coding:
+  supports_vision: true
+  context_window: 262000
+kimi-k2.6:
+  supports_vision: true
+  context_window: 262000
+kimi-k2.7-code:
+  supports_vision: true
+  context_window: 262000
+MiniMax-M2.7:
+  supports_vision: false
+  context_window: 200000
+MiniMax-M2.7-highspeed:
+  supports_vision: false
+  context_window: 200000
+MiniMax-M3:
+  supports_vision: true
+  context_window: 1000000

@@ -5,12 +5,16 @@
   import PolicyTab from './tabs/PolicyTab.svelte';
   import ObservabilityTab from './tabs/ObservabilityTab.svelte';
   import ConnectionTab from './tabs/ConnectionTab.svelte';
+  import MlTab from './tabs/MlTab.svelte';
+  import ModelConfigTab from './tabs/ModelConfigTab.svelte';
 
   const TABS = [
     { id: 'connection',    label: '连接' },
+    { id: 'modelconfig',   label: '模型' },
     { id: 'strategies',    label: '策略' },
+    { id: 'ml',            label: 'ML' },
     { id: 'policy',        label: '后处理' },
-    { id: 'observability', label: '观测' },
+    { id: 'observability', label: '日志' },
   ] as const;
 
   let activeTab: typeof TABS[number]['id'] = 'connection';
@@ -19,34 +23,16 @@
   let saveError: string = '';
   let saveOk: string = '';
 
-  // 上游模型(整个 SPA 共享,从 /api/models 拉取一次缓存)
-  let upstreamModels: string[] = [];
-  let modelsLoading = false;
-  let modelsError = '';
-
+  // 注册表里的模型名(给 StrategiesTab 的 ModelSelect 用)
+  $: models = snapshot ? Object.keys(snapshot.models ?? {}).sort() : [];
   $: dirty = dirtySections.size > 0;
   $: strategyCount = snapshot ? Object.keys(snapshot.strategies ?? {}).length : 0;
-
-  async function loadModels() {
-    modelsLoading = true; modelsError = '';
-    try {
-      upstreamModels = await api.upstreamModels();
-    } catch (e: any) {
-      modelsError = e.message;
-    } finally {
-      modelsLoading = false;
-    }
-  }
 
   onMount(async () => {
     try {
       snapshot = await api.getAll();
     } catch (e: any) {
       saveError = '加载配置失败: ' + e.message;
-    }
-    // 首次访问自动拉一次上游模型(api_key 已配才拉,免得空 key 刷报错)
-    if (snapshot?.connection?.new_api?.api_key) {
-      loadModels();
     }
   });
 
@@ -64,6 +50,8 @@
     if (dirtySections.has('policy'))        await api.putSection('policy',        snapshot.policy);
     if (dirtySections.has('strategies'))    await api.putSection('strategies',    snapshot.strategies);
     if (dirtySections.has('observability')) await api.putSection('observability', snapshot.observability);
+    if (dirtySections.has('ml'))            await api.putSection('ml',            snapshot.ml);
+    if (dirtySections.has('modelconfig'))   await api.putSection('models',        snapshot.models);
     try { await api.reload(); } catch {}
     dirtySections = new Set();
     saveOk = '已保存并立即生效';
@@ -105,7 +93,11 @@
       {#if activeTab === 'connection'}
         <ConnectionTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
       {:else if activeTab === 'strategies'}
-        <StrategiesTab bind:snapshot={snapshot} onChange={onChangeFromTab} {upstreamModels} />
+        <StrategiesTab bind:snapshot={snapshot} onChange={onChangeFromTab} {models} />
+      {:else if activeTab === 'modelconfig'}
+        <ModelConfigTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
+      {:else if activeTab === 'ml'}
+        <MlTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
       {:else if activeTab === 'policy'}
         <PolicyTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
       {:else if activeTab === 'observability'}
@@ -120,9 +112,6 @@
         {#if saveOk}<span class="muted">{saveOk}</span>{/if}
         {#if saveError}<span class="muted" style="color: var(--danger);">{saveError}</span>{/if}
         <div class="spacer"></div>
-        <button class="btn btn-secondary" on:click={loadModels} disabled={modelsLoading} title="从 new-api 拉取模型列表,填入下方选项">
-          {modelsLoading ? '拉取中…' : (upstreamModels.length ? `↻ 重新拉取上游 (${upstreamModels.length})` : '拉取上游模型')}
-        </button>
         <button class="btn btn-secondary" on:click={reloadFromDisk}>从磁盘重载</button>
         <button class="btn btn-primary" on:click={save} disabled={!dirty}>保存并热重载</button>
       </div>
