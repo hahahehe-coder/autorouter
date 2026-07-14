@@ -51,7 +51,7 @@
     <div class="test-out has-result">
 策略     <code>{preview.strategy}</code>
 路由源   <code>{preview.source}</code>{#if preview.band} ({preview.band}){/if}
-档位     <code>{preview.tier}</code>
+档位     <code>{preview.rule_idx}</code>
 模型     <code>{preview.model}</code>
 置信度   <code>{(preview.confidence ?? 0).toFixed(2)}</code>
 {#if Object.keys(preview.inference ?? {}).length > 0}
@@ -60,7 +60,7 @@ inference <code>{JSON.stringify(preview.inference)}</code>
 
 策略链:
 {#each preview.policies as p}
-  · <strong>{p.name}</strong>{#if p.fired} 🔥({p.input_tier}→{p.output_tier} · {p.info}){:else} ({p.input_tier}){/if}
+  · <strong>{p.name}</strong>{#if p.fired} 🔥({p.input_idx}→{p.output_idx} · {p.info}){:else} ({p.input_idx}){/if}
 {/each}
     </div>
   {:else}

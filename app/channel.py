@@ -16,7 +16,6 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import config as config_mod
-from .features import _last_user_text
 from .observe import Observer
 from .router import route
 from .session import SessionStore, compute_session_key
@@ -74,13 +73,92 @@ def _upstream_headers(req: Request) -> dict:
     return h
 
 
-def _apply_inference(body: dict, inference: dict) -> dict:
-    """把 inference 字段塞进 body(覆盖原值)。返回新的 body 引用。"""
-    if not inference:
-        return body
-    for k, v in inference.items():
-        body[k] = v
-    return body
+# ============================ endpoint dispatch ============================
+
+EP_CHAT, EP_MESSAGES, EP_RESPONSES = "chat", "messages", "responses"
+
+
+def _endpoint_user_text(endpoint: str, body: dict) -> str:
+    """从各端点 body 抽出用户文本,给 classifier 用。"""
+    if endpoint in (EP_CHAT, EP_MESSAGES):
+        for m in reversed(body.get("messages") or []):
+            if m.get("role") == "user":
+                c = m.get("content")
+                if isinstance(c, str): return c
+                if isinstance(c, list):
+                    for b in c:
+                        if isinstance(b, dict) and b.get("type") == "text":
+                            return b.get("text", "")
+    elif endpoint == EP_RESPONSES:
+        inp = body.get("input")
+        if isinstance(inp, str): return inp
+        if isinstance(inp, list) and inp:
+            last = inp[-1]
+            if isinstance(last, dict):
+                c = last.get("content")
+                if isinstance(c, str): return c
+                if isinstance(c, list):
+                    for b in c:
+                        if isinstance(b, dict) and b.get("type") == "text":
+                            return b.get("text", "")
+    return ""
+
+
+def _messages_for_router(endpoint: str, body: dict) -> list:
+    """归一化成 messages[] 给 router.classify_with_messages 用。"""
+    if endpoint in (EP_CHAT, EP_MESSAGES):
+        return body.get("messages") or []
+    text = _endpoint_user_text(EP_RESPONSES, body)
+    return [{"role": "user", "content": text}] if text else []
+
+
+def _set_chat_system(body: dict, system_text: str) -> None:
+    """chat 端点的 system:在 messages[0] 插/替换一条 system 消息。"""
+    msgs = body.get("messages") or []
+    if msgs and msgs[0].get("role") == "system":
+        msgs[0]["content"] = system_text
+    else:
+        msgs.insert(0, {"role": "system", "content": system_text})
+    body["messages"] = msgs
+
+
+def _apply_field(endpoint: str, canonical: str, value, body: dict) -> None:
+    """按端点字段映射,把 canonical 字段写入 body(messages 的 thinking 写两键)。"""
+    if canonical == "model":
+        body["model"] = value
+    elif canonical == "max_tokens":
+        body["max_output_tokens" if endpoint == EP_RESPONSES else "max_tokens"] = value
+    elif canonical == "system":
+        if endpoint == EP_CHAT:
+            _set_chat_system(body, value)
+        elif endpoint == EP_MESSAGES:
+            body["system"] = value
+        elif endpoint == EP_RESPONSES:
+            body["instructions"] = value
+    elif canonical == "thinking":
+        if value == "off":   # 不思考:按端点写关闭值,并清掉残留的开启态字段
+            if endpoint == EP_CHAT:
+                body.pop("reasoning_effort", None)
+                body["reasoning"] = {"exclude": True}
+            elif endpoint == EP_RESPONSES:
+                body["reasoning"] = {"effort": "none"}
+            elif endpoint == EP_MESSAGES:
+                body.pop("output_config", None)
+                body["thinking"] = {"type": "disabled"}
+        elif endpoint == EP_CHAT:
+            body["reasoning_effort"] = value
+        elif endpoint == EP_RESPONSES:
+            body["reasoning"] = {"effort": value}
+        elif endpoint == EP_MESSAGES:
+            body["thinking"] = {"type": "adaptive"}
+            body["output_config"] = {"effort": value}
+
+
+async def _stream_upstream(path: str, body: dict, headers: dict) -> AsyncGenerator[bytes, None]:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+        async with client.stream("POST", f"{_new_api_base()}{path}", json=body, headers=headers) as resp:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
 
 
 # ============================ 公共路由 ============================
@@ -107,23 +185,18 @@ async def list_models_strategy():
     }
 
 
-async def _stream_chat(body: dict, headers: dict) -> AsyncGenerator[bytes, None]:
-    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-        async with client.stream(
-            "POST", f"{_new_api_base()}/v1/chat/completions", json=body, headers=headers
-        ) as resp:
-            async for chunk in resp.aiter_bytes():
-                yield chunk
+# ============================ unified route + overlay core ============================
 
-
-@app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
+async def _route_and_forward(endpoint: str, request: Request):
+    """chat / messages / responses 三个端点共用:路由 → 字段覆盖 → 转发同端点。"""
     body = await request.json()
     headers = _upstream_headers(request)
-    want_model = body.get("model", "")
+    upstream_path = f"/v1/{endpoint}"
 
-    messages = body.get("messages", []) or []
-    text = _last_user_text(body)
+    want_model = body.get("model", "")
+    messages = _messages_for_router(endpoint, body)
+    text = _endpoint_user_text(endpoint, body)
+
     session_key = compute_session_key(headers.get("Authorization", ""), messages)
     prev_idx = _SESSIONS.get_previous_idx(session_key, _CFG.policy.anti_downgrade_window_seconds)
 
@@ -131,15 +204,13 @@ async def chat_completions(request: Request):
                      messages=messages, session_key=session_key,
                      prev_idx=prev_idx)
 
-    # 记 session(下一轮 anti_downgrade 用)
     if decision.rule_idx >= 0:
         _SESSIONS.record(session_key, decision.rule_idx)
 
-    # inference 注入 + 改 model
-    body["model"] = decision.model
-    body = _apply_inference(body, decision.inference)
+    # 字段覆盖:规则里声明什么字段(model/max_tokens/system/thinking)就覆盖什么
+    for k, v in (decision.fields or {}).items():
+        _apply_field(endpoint, k, v, body)
 
-    # observe
     _OBSERVER.record(
         strategy=decision.strategy, session_key=session_key,
         msg_preview=text, rule_idx=decision.rule_idx, model=decision.model,
@@ -149,14 +220,15 @@ async def chat_completions(request: Request):
 
     extra = {
         "X-Auto-Routed-To": decision.model,
-        "X-Auto-Rule":       f"{decision.rule_idx}" if decision.rule_idx >= 0 else "-",
-        "X-Strategy":        decision.strategy,
-        "X-Source":          decision.source,
+        "X-Auto-Rule":      f"{decision.rule_idx}" if decision.rule_idx >= 0 else "-",
+        "X-Strategy":       decision.strategy,
+        "X-Source":         decision.source,
     }
+
     if body.get("stream"):
         async def gen():
             try:
-                async for chunk in _stream_chat(body, headers):
+                async for chunk in _stream_upstream(upstream_path, body, headers):
                     yield chunk
             except httpx.HTTPError as e:
                 logger.error(f"upstream stream error: {e}")
@@ -165,33 +237,31 @@ async def chat_completions(request: Request):
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-            resp = await client.post(
-                f"{_new_api_base()}/v1/chat/completions", json=body, headers=headers
-            )
+            resp = await client.post(f"{_new_api_base()}{upstream_path}", json=body, headers=headers)
             return JSONResponse(content=resp.json(), status_code=resp.status_code, headers=extra)
     except httpx.HTTPError as e:
-        logger.error(f"upstream error: {e}")
+        logger.error(f"upstream error on {upstream_path}: {e}")
         return JSONResponse({"error": f"upstream unreachable: {e}"}, status_code=502)
 
 
-# ============================ 透传类端点(embedding / audio / images 等) ============================
+# ============================ 三个路由目标端点 ============================
 
-# 三个目标端点 — /v1/chat/completions 走路由决策,
-# /v1/messages (Anthropic) 和 /v1/responses (OpenAI) 直接透传。
-# 其它 /v1/* 路径(embeddings、audio 等)走下面的 catch-all 兜底。
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    return await _route_and_forward(EP_CHAT, request)
 
 
 @app.post("/v1/messages")
-async def messages_passthrough(request: Request):
-    """Anthropic Messages API — 透传到 new-api /v1/messages,不动 body。"""
-    return await _transparent_post("messages", request)
+async def messages_endpoint(request: Request):
+    return await _route_and_forward(EP_MESSAGES, request)
 
 
 @app.post("/v1/responses")
-async def responses_passthrough(request: Request):
-    """OpenAI Responses API — 透传到 new-api /v1/responses,不动 body。"""
-    return await _transparent_post("responses", request)
+async def responses_endpoint(request: Request):
+    return await _route_and_forward(EP_RESPONSES, request)
 
+
+# ============================ 兜底透传(embeddings / audio / images 等) ============================
 
 async def _transparent_post(path: str, request: Request) -> Response:
     body_bytes = await request.body()
@@ -276,9 +346,9 @@ async def route_preview(request: Request):
         "confidence": decision.confidence,
         "source": decision.source,
         "band": decision.band,
-        "inference": decision.inference,
+        "fields": decision.fields,
         "policies": [
-            {"name": s.name, "in": s.input_idx, "out": s.output_idx, "fired": s.fired, "info": s.info}
+            {"name": s.name, "input_idx": s.input_idx, "output_idx": s.output_idx, "fired": s.fired, "info": s.info}
             for s in decision.policies
         ],
     }
@@ -308,8 +378,12 @@ def _serialize(cfg: config_mod.Config) -> dict:
     """合并 Config → dict(给 API 返回)。YAML 风格 dict。"""
     def rule_to_dict(r):
         d = {"model": r.model}
-        if r.inference:
-            d["inference"] = r.inference
+        if r.max_tokens is not None:
+            d["max_tokens"] = r.max_tokens
+        if r.system:
+            d["system"] = r.system
+        if r.thinking:
+            d["thinking"] = r.thinking
         return d
     return {
         "connection": {

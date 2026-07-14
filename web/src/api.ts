@@ -1,11 +1,13 @@
 // API 类型 + 后端 client
-// ConfigSnapshot 不再有 tiers,strategies.X 是 {kind, rule} 或 {kind, rules: []}
+// 规则字段扁平化(model 跟其他字段一视同仁,后端按端点映射写 body)
 
 const BASE = '';
 
 export interface RuleData {
   model: string;
-  inference?: Record<string, any>;
+  max_tokens?: number;
+  system?: string;
+  thinking?: string;        // effort 字符串(各端点映射见 channel._apply_field)
 }
 export interface StrategyData {
   kind: 'static' | 'heuristic';
@@ -27,7 +29,7 @@ export interface RoutingPreview {
   confidence: number;
   source: string;
   band: string;
-  inference: Record<string, any>;
+  fields: Record<string, any>;
   policies: Array<{ name: string; input_idx: number; output_idx: number; fired: boolean; info: string }>;
 }
 

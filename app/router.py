@@ -32,7 +32,8 @@ class RoutingDecision:
     source: str                  # static / heuristic / passthrough
     band: str = ""
     session_key: str = ""
-    inference: dict[str, Any] = field(default_factory=dict)
+    # 这个档位要覆盖到请求 body 的字段集合(model 必含,其它可选)
+    fields: dict[str, Any] = field(default_factory=dict)
     policies: list[PolicyStep] = field(default_factory=list)
 
 
@@ -40,6 +41,19 @@ class RoutingDecision:
 
 def _last_user_text_from_messages(messages: list) -> str:
     return _last_user_text({"messages": messages})
+
+
+def _rule_fields(rule) -> dict:
+    """从 RuleCfg 抽出'实际要覆盖'的字段:空值/None 跳过。
+    model 必填;thinking 空串=原样透传(不进 fields),'off'=不思考(强制关闭)。"""
+    f = {"model": rule.model}
+    if rule.max_tokens is not None:
+        f["max_tokens"] = rule.max_tokens
+    if rule.system:
+        f["system"] = rule.system
+    if rule.thinking:
+        f["thinking"] = rule.thinking
+    return f
 
 
 def _pick_rule(strategy: StrategyCfg, idx: int) -> RuleCfg | None:
@@ -64,7 +78,7 @@ def _route_static(strategy: StrategyCfg) -> RoutingDecision:
         model=rule.model,
         confidence=1.0,
         source="static",
-        inference=dict(rule.inference),
+        fields=_rule_fields(rule),
     )
 
 
@@ -99,7 +113,7 @@ def _route_heuristic(strategy: StrategyCfg, body: dict, messages: list,
         source="heuristic",
         band=band,
         session_key=session_key,
-        inference=dict(rule.inference),
+        fields=_rule_fields(rule),
         policies=steps,
     )
 

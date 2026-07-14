@@ -68,9 +68,14 @@ class PolicyCfg:
 
 @dataclass
 class RuleCfg:
-    """单条 rule。heuristic 策略按数组下标匹配 classifier 输出。"""
+    """单条 rule。heuristic 策略按数组下标匹配 classifier 输出。
+    字段全是路由后要覆盖到请求 body 的项 —— model 跟其他字段一视同仁。
+    没设的可选字段(max_tokens/system/thinking)在覆盖阶段被跳过,保留用户原值。
+    """
     model: str = ""
-    inference: dict[str, Any] = field(default_factory=dict)
+    max_tokens: int | None = None
+    system: str = ""
+    thinking: str = ""
 
 
 @dataclass
@@ -139,7 +144,17 @@ def validate(cfg: Config) -> None:
 
 def _parse_rule(d: dict | None) -> RuleCfg:
     d = d or {}
-    return RuleCfg(model=d.get("model", ""), inference=d.get("inference") or {})
+    if "inference" in d:
+        raise ValueError(
+            "rule uses deprecated 'inference' field — use flat max_tokens/system/thinking on the rule directly"
+        )
+    mt = d.get("max_tokens")
+    return RuleCfg(
+        model=d.get("model", ""),
+        max_tokens=int(mt) if mt is not None else None,
+        system=d.get("system") or "",
+        thinking=d.get("thinking") or "",
+    )
 
 
 def _parse_connection(d: dict | None) -> ConnectionCfg:

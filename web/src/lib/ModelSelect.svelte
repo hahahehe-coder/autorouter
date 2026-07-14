@@ -1,13 +1,15 @@
 <script lang="ts">
   /*
-    模型选择器(双向 bind:value):
+    模型选择器。
     - 上游模型已加载: <select> 下拉,带"自定义..."选项
     - 选自定义: 弹文本输入
     - 上游模型未加载: 直接文本输入
-    - 父组件用 bind:value={someVar} 同步值
+    父组件:value= 传当前值,on:change={(e)=>...} 接收新值(e.detail 是模型名)。
   */
+  import { createEventDispatcher } from 'svelte';
   export let value: string = '';
   export let upstreamModels: string[] = [];
+  const dispatch = createEventDispatcher();
 
   let customMode = false;
   let customText = '';
@@ -33,22 +35,26 @@
     } else {
       customMode = false;
       value = v;
+      dispatch('change', v);
     }
   }
 
   function onCustomInput(e: Event) {
     customText = (e.target as HTMLInputElement).value;
     value = customText;
+    dispatch('change', customText);
   }
 
   function backToSelect() {
     customMode = false;
     customText = '';
     value = '';
+    dispatch('change', '');
   }
 
   function onPlainInput(e: Event) {
     value = (e.target as HTMLInputElement).value;
+    dispatch('change', value);
   }
 
   function focusCustomInput() {

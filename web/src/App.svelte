@@ -44,6 +44,10 @@
     } catch (e: any) {
       saveError = '加载配置失败: ' + e.message;
     }
+    // 首次访问自动拉一次上游模型(api_key 已配才拉,免得空 key 刷报错)
+    if (snapshot?.connection?.new_api?.api_key) {
+      loadModels();
+    }
   });
 
   function markDirty(section: string) {

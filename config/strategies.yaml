@@ -2,22 +2,22 @@ fast:
   kind: static
   rule:
     model: MiniMax-M3
-    inference:
-      max_tokens: 1024
+    max_tokens: 4096
 expert:
   kind: static
   rule:
-    model: claude-opus-4.8
-    inference:
-      reasoning_effort: high
+    model: glm-5.2
+    max_tokens: 16000
 auto:
   kind: heuristic
   rules:
   - model: MiniMax-M3
+    max_tokens: 4096
+    thinking: 'off'
+  - model: glm-5.1
   - model: glm-5.2
-  - model: deepseek-pro
-    inference:
-      reasoning_effort: medium
-  - model: claude-opus-4.8
-    inference:
-      reasoning_effort: high
+    system: 你是一个资深程序员。优先给出可运行的代码,简短说明。
+    thinking: medium
+  - model: glm-5.2
+    system: 你是严谨的助理。对复杂问题展开深入推理。
+    thinking: high

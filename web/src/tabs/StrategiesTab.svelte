@@ -65,47 +65,53 @@
   // --- static rule ---
   function setStaticModel(name: string, e: Event) {
     if (!snapshot.strategies[name].rule) snapshot.strategies[name].rule = { model: '' };
-    snapshot.strategies[name].rule!.model = (e.target as HTMLInputElement).value;
+    snapshot.strategies[name].rule!.model = (e as CustomEvent).detail;
     snapshot = snapshot; onChange();
   }
-  function addStaticInference(name: string) {
+  function setStaticField(name: string, field: 'max_tokens' | 'system' | 'thinking', val: any) {
     if (!snapshot.strategies[name].rule) snapshot.strategies[name].rule = { model: '' };
-    snapshot.strategies[name].rule!.inference ??= {};
-    const key = prompt('字段名(例如 max_tokens / reasoning_effort):');
-    if (key) {
-      snapshot.strategies[name].rule!.inference![key] = '';
-      snapshot = snapshot; onChange();
+    const r = snapshot.strategies[name].rule!;
+    if (val === '' || val === null || val === undefined) {
+      delete r[field];
+    } else {
+      r[field] = val;
     }
-  }
-  function removeStaticInference(name: string, key: string) {
-    delete snapshot.strategies[name].rule!.inference![key];
     snapshot = snapshot; onChange();
   }
-  function onStaticInfValInput(name: string, key: string, e: Event) {
-    snapshot.strategies[name].rule!.inference![key] = (e.target as HTMLInputElement).value;
-    snapshot = snapshot;
+  function onStaticMaxTokensInput(name: string, e: Event) {
+    const v = parseInt((e.target as HTMLInputElement).value);
+    setStaticField(name, 'max_tokens', Number.isNaN(v) ? '' : v);
+  }
+  function onStaticSystemInput(name: string, e: Event) {
+    setStaticField(name, 'system', (e.target as HTMLTextAreaElement).value);
+  }
+  function onStaticThinkingInput(name: string, e: Event) {
+    setStaticField(name, 'thinking', (e.target as HTMLInputElement).value);
   }
 
   // --- heuristic rules ---
   function onRuleModelInput(name: string, idx: number, e: Event) {
-    snapshot.strategies[name].rules![idx].model = (e.target as HTMLInputElement).value;
+    snapshot.strategies[name].rules![idx].model = (e as CustomEvent).detail;
     snapshot = snapshot; onChange();
   }
-  function addRuleInference(name: string, idx: number) {
-    snapshot.strategies[name].rules![idx].inference ??= {};
-    const key = prompt('字段名:');
-    if (key) {
-      snapshot.strategies[name].rules![idx].inference![key] = '';
-      snapshot = snapshot; onChange();
+  function onRuleFieldInput(name: string, idx: number, field: 'max_tokens' | 'system' | 'thinking', val: any) {
+    const r = snapshot.strategies[name].rules![idx];
+    if (val === '' || val === null || val === undefined) {
+      delete r[field];
+    } else {
+      r[field] = val;
     }
-  }
-  function removeRuleInference(name: string, idx: number, key: string) {
-    delete snapshot.strategies[name].rules![idx].inference![key];
     snapshot = snapshot; onChange();
   }
-  function onRuleInfValInput(name: string, idx: number, key: string, e: Event) {
-    snapshot.strategies[name].rules![idx].inference![key] = (e.target as HTMLInputElement).value;
-    snapshot = snapshot;
+  function onRuleMaxTokensInput(name: string, idx: number, e: Event) {
+    const v = parseInt((e.target as HTMLInputElement).value);
+    onRuleFieldInput(name, idx, 'max_tokens', Number.isNaN(v) ? '' : v);
+  }
+  function onRuleSystemInput(name: string, idx: number, e: Event) {
+    onRuleFieldInput(name, idx, 'system', (e.target as HTMLTextAreaElement).value);
+  }
+  function onRuleThinkingInput(name: string, idx: number, e: Event) {
+    onRuleFieldInput(name, idx, 'thinking', (e.target as HTMLInputElement).value);
   }
   function addRule(name: string) {
     snapshot.strategies[name].rules!.push({ model: '' });
@@ -184,21 +190,34 @@
             <ModelSelect value={snapshot.strategies[n].rule?.model ?? ''} {upstreamModels}
               on:change={(e) => setStaticModel(n, e)} />
           </div>
+          <div class="field-row">
           <div class="field">
-            <label class="field-label">inference(注入 body,覆盖用户同名字段)</label>
-            <div style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
-              {#each Object.entries(snapshot.strategies[n].rule?.inference ?? {}) as [k, v] (k)}
-                <span class="inference-row">
-                  <code>{k}</code>
-                  <span class="equals">=</span>
-                  <input class="mono inference-val" type="text" value={String(v)}
-                    on:change={(e) => onStaticInfValInput(n, k, e)} />
-                  <button class="btn-danger btn-sm" on:click={() => removeStaticInference(n, k)}>删除</button>
-                </span>
-              {/each}
-              <button class="btn-ghost" style="font-size: 12px; height: 28px;" on:click={() => addStaticInference(n)}>+ 字段</button>
-            </div>
+            <label class="field-label">最大输出 token</label>
+            <input class="mono" type="number" min="1" value={snapshot.strategies[n].rule?.max_tokens ?? ''}
+              placeholder="留空则不覆盖" on:change={(e) => onStaticMaxTokensInput(n, e)} />
           </div>
+          <div class="field">
+            <label class="field-label">思考强度</label>
+            <select class="mono" value={snapshot.strategies[n].rule?.thinking ?? ''}
+              on:change={(e) => onStaticThinkingInput(n, e)}>
+              <option value="">原样透传</option>
+              <option value="off">不思考</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label class="field-label">系统提示</label>
+          <textarea class="mono" rows="3" style="resize: none; overflow-y: auto;"
+            placeholder="留空则不覆盖;chat 端点注入为 messages[0] system"
+            value={snapshot.strategies[n].rule?.system ?? ''}
+            on:change={(e) => onStaticSystemInput(n, e)}></textarea>
+        </div>
+        <p class="muted" style="margin: 4px 0 0; font-size: 12px;">
+          端点自动映射:chat → reasoning_effort / messages → thinking + output_config / responses → reasoning。
+        </p>
         {:else}
           <p class="muted" style="margin: 0 0 8px;">
             数组下标 = classifier 输出(0 trivial / 1 medium / 2 code / 3 heavy)。越往后能力越强。
@@ -219,20 +238,29 @@
                 <ModelSelect value={r.model ?? ''} {upstreamModels} on:change={(e) => onRuleModelInput(n, i, e)} />
               </div>
 
-              <div class="field">
-                <label class="field-label">inference</label>
-                <div style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
-                  {#each Object.entries(r.inference ?? {}) as [k, v] (k)}
-                    <span class="inference-row">
-                      <code>{k}</code>
-                      <span class="equals">=</span>
-                      <input class="mono inference-val" type="text" value={String(v)}
-                        on:change={(e) => onRuleInfValInput(n, i, k, e)} />
-                      <button class="btn-danger btn-sm" on:click={() => removeRuleInference(n, i, k)}>删除</button>
-                    </span>
-                  {/each}
-                  <button class="btn-ghost" style="font-size: 12px; height: 28px;" on:click={() => addRuleInference(n, i)}>+ 字段</button>
+              <div class="field-row">
+                <div class="field">
+                  <label class="field-label">最大输出 token</label>
+                  <input class="mono" type="number" min="1" value={r.max_tokens ?? ''}
+                    placeholder="留空则不覆盖" on:change={(e) => onRuleMaxTokensInput(n, i, e)} />
                 </div>
+                <div class="field">
+                  <label class="field-label">思考强度</label>
+                  <select class="mono" value={r.thinking ?? ''}
+                    on:change={(e) => onRuleThinkingInput(n, i, e)}>
+                    <option value="">原样透传</option>
+                    <option value="off">不思考</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label class="field-label">系统提示</label>
+                <textarea class="mono" rows="2" style="resize: none; overflow-y: auto;"
+                  placeholder="留空则不覆盖" value={r.system ?? ''}
+                  on:change={(e) => onRuleSystemInput(n, i, e)}></textarea>
               </div>
             </div>
           {/each}
@@ -267,6 +295,7 @@
     color: var(--accent);
   }
   .rule-card-actions { display: flex; gap: 4px; align-items: center; }
+  .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
 
   .inference-row {
     display: inline-flex; align-items: center; gap: 4px;
