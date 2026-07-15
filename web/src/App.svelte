@@ -101,6 +101,12 @@
     loggedIn = false;
     loginPrompt = '已退出, 请重新登录';
   }
+
+  // LoginScreen 登录成功后调用:加载 snapshot + 切到 tabs
+  async function handleLogin() {
+    loggedIn = true;
+    await loadSnapshot();
+  }
 </script>
 
 <div class="app">
@@ -125,7 +131,7 @@
 
   <main class="main">
     {#if !showTabs}
-      <LoginScreen promptMessage={loginPrompt} />
+      <LoginScreen promptMessage={loginPrompt} onLogin={handleLogin} />
     {:else if activeTab === 'connection'}
       <ConnectionTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
     {:else if activeTab === 'strategies'}

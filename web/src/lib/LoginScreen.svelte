@@ -13,6 +13,8 @@
   let submitting = false;
   // 登录提示:由 App.svelte 在检测到 401 时设置一次
   export let promptMessage = '';
+  // 登录成功后通知 App.svelte 重新加载 snapshot + 切到 tabs 视图
+  export let onLogin: () => void = () => {};
 
   $: enabled = !!getAuthB64();
   onAuthChange(() => { enabled = !!getAuthB64(); });
@@ -33,6 +35,7 @@
         error = `登录失败 (HTTP ${r.status})`;
       } else {
         error = '';
+        onLogin();   // 通知父组件刷新 snapshot + 切到 tabs 视图
       }
     } catch (e: any) {
       error = `网络错误: ${e?.message || e}`;
