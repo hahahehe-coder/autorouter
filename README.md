@@ -325,4 +325,11 @@ req_*.json              # curl 测试体(开发参考)
 
 ## License
 
-项目内 ML 权重来自 OpenSquilla v4.2 phase3(见 `models/v4.2_phase3_inference/PROVENANCE.md` 和根目录的 `THIRD_PARTY_NOTICES.md`)。
+本项目代码以 [MIT License](LICENSE)(`Copyright (c) 2026 hahahehe`)发布。
+
+项目内嵌的 ML 路由能力来自 [OpenSquilla](https://github.com/opensquilla/opensquilla) 的
+SquillaRouter V4 Phase 3 inference bundle(`models/v4.2_phase3_inference/`,遵循上游 MIT 协议)。
+BGE 嵌入模型来自 [FlagOpen/FlagEmbedding](https://github.com/FlagOpen/FlagEmbedding)
+(`BAAI/bge-small-zh-v1.5`)。
+
+完整三方依赖列表见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
