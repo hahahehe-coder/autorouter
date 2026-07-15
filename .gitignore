@@ -11,7 +11,7 @@ web/dist/
 log/
 
 # ML bundle(~76MB 二进制,从 OpenSquilla 拷入;不入库,各环境自行放置/配置 bundle_path)
-models/
+# models/
 
 # 本地杂物
 .claude/
