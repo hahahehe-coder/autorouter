@@ -52,6 +52,10 @@ class NewApiCfg:
 class ConnectionCfg:
     server: ServerCfg = field(default_factory=ServerCfg)
     new_api: NewApiCfg = field(default_factory=NewApiCfg)
+    # 管理后台登录(仅挡 /api/* 设置端点,/v1/* 转发不受影响)
+    # password 留空 = 不启用登录(开发模式默认)
+    admin_user: str = "admin"
+    admin_password: str = ""
 
 
 # ============================================================
@@ -220,9 +224,12 @@ def _parse_connection(d: dict | None) -> ConnectionCfg:
     d = d or {}
     s = d.get("server") or {}
     n = d.get("new_api") or {}
+    a = d.get("admin") or {}
     return ConnectionCfg(
         server=ServerCfg(host=s.get("host", "127.0.0.1"), port=int(s.get("port", 3001))),
         new_api=NewApiCfg(base_url=n.get("base_url", "http://127.0.0.1:3000"), api_key=n.get("api_key", "")),
+        admin_user=str(a.get("user", "admin")),
+        admin_password=str(a.get("password", "")),
     )
 
 

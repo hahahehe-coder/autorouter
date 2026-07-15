@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, type ConfigSnapshot } from './api';
+  import { api, type ConfigSnapshot, getAuthB64, clearAuth, onAuth401 } from './api';
   import StrategiesTab from './tabs/StrategiesTab.svelte';
   import PolicyTab from './tabs/PolicyTab.svelte';
   import ObservabilityTab from './tabs/ObservabilityTab.svelte';
   import ConnectionTab from './tabs/ConnectionTab.svelte';
   import MlTab from './tabs/MlTab.svelte';
   import ModelConfigTab from './tabs/ModelConfigTab.svelte';
+  import LoginScreen from './lib/LoginScreen.svelte';
 
   const TABS = [
     { id: 'connection',    label: '连接' },
@@ -23,18 +24,46 @@
   let saveError: string = '';
   let saveOk: string = '';
 
-  // 注册表里的模型名(给 StrategiesTab 的 ModelSelect 用)
+  // 登录态:有凭证(snapshot 加载成功)= 看到 tabs,否则显示 LoginScreen
+  let loggedIn = false;
+  let loginPrompt = '';   // 提示语(401 时由 api.ts 通知触发)
+  const unsubAuth = onAuth401(() => {
+    loggedIn = false;
+    loginPrompt = '凭证失效或未提供,请重新登录';
+    snapshot = null;
+  });
+
   $: models = snapshot ? Object.keys(snapshot.models ?? {}).sort() : [];
   $: dirty = dirtySections.size > 0;
   $: strategyCount = snapshot ? Object.keys(snapshot.strategies ?? {}).length : 0;
+  // 已登录 + 已加载 snapshot = 看 tabs,否则弹 LoginScreen
+  // 后端 admin.enabled 反映 password 是否配了,password 空 → 自动放行
+  $: showTabs = loggedIn && !!snapshot;
 
   onMount(async () => {
+    // 启动时看 localStorage 是否有凭证 → 直接复用(SPA 重启不丢)
+    if (getAuthB64()) {
+      loggedIn = true;
+    }
+    await loadSnapshot();
+  });
+
+  async function loadSnapshot() {
     try {
       snapshot = await api.getAll();
+      // 没密码配值时直接进;有密码但凭证对就进;错就 401 触发 LoginScreen
+      const enabled = snapshot?.connection?.admin?.enabled;
+      if (!enabled) loggedIn = true;
+      else if (getAuthB64()) loggedIn = true;
     } catch (e: any) {
-      saveError = '加载配置失败: ' + e.message;
+      if (/auth/.test(e.message)) {
+        loggedIn = false;
+        loginPrompt = '需要登录';
+      } else {
+        saveError = '加载配置失败: ' + e.message;
+      }
     }
-  });
+  }
 
   function markDirty(section: string) {
     dirtySections = new Set(dirtySections).add(section);
@@ -64,6 +93,14 @@
     saveOk = '已从磁盘重载';
     saveError = '';
   }
+
+  function logout() {
+    clearAuth();
+    snapshot = null;
+    dirtySections = new Set();
+    loggedIn = false;
+    loginPrompt = '已退出, 请重新登录';
+  }
 </script>
 
 <div class="app">
@@ -87,23 +124,23 @@
   </aside>
 
   <main class="main">
-    {#if !snapshot}
-      <p class="muted">加载中…</p>
-    {:else}
-      {#if activeTab === 'connection'}
-        <ConnectionTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
-      {:else if activeTab === 'strategies'}
-        <StrategiesTab bind:snapshot={snapshot} onChange={onChangeFromTab} {models} />
-      {:else if activeTab === 'modelconfig'}
-        <ModelConfigTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
-      {:else if activeTab === 'ml'}
-        <MlTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
-      {:else if activeTab === 'policy'}
-        <PolicyTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
-      {:else if activeTab === 'observability'}
-        <ObservabilityTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
-      {/if}
+    {#if !showTabs}
+      <LoginScreen promptMessage={loginPrompt} />
+    {:else if activeTab === 'connection'}
+      <ConnectionTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
+    {:else if activeTab === 'strategies'}
+      <StrategiesTab bind:snapshot={snapshot} onChange={onChangeFromTab} {models} />
+    {:else if activeTab === 'modelconfig'}
+      <ModelConfigTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
+    {:else if activeTab === 'ml'}
+      <MlTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
+    {:else if activeTab === 'policy'}
+      <PolicyTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
+    {:else if activeTab === 'observability'}
+      <ObservabilityTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
+    {/if}
 
+    {#if showTabs}
       <div class="toolbar">
         <div class="dirty-indicator {dirty ? 'dirty' : ''}">
           <span class="dot"></span>
@@ -114,6 +151,7 @@
         <div class="spacer"></div>
         <button class="btn btn-secondary" on:click={reloadFromDisk}>从磁盘重载</button>
         <button class="btn btn-primary" on:click={save} disabled={!dirty}>保存并热重载</button>
+        <button class="btn-ghost btn-sm" on:click={logout} style="margin-left: 4px;">退出</button>
       </div>
     {/if}
   </main>

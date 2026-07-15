@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import base64
 import logging
 import logging.handlers as logging_handlers
 import os
@@ -204,6 +205,45 @@ import os as _os
 from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="auto-router pseudo channel", version="2.0.0")
+
+
+# ============================ admin auth 中间件 ============================
+
+# 不需要 admin auth 的路径(白名单):健康检查
+_AUTH_BYPASS_PATHS = frozenset(("/health",))
+
+
+def _check_admin_basic(request: Request) -> bool:
+    """Basic Auth 校验。password 留空 = 关闭 auth(开发模式),任何人都过。"""
+    cfg = _CFG.connection
+    if not cfg.admin_password:                # dev 模式:password 空 → 不挡
+        return True
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(auth[6:].strip(), validate=True).decode("utf-8")
+        user, _, pw = decoded.partition(":")
+        return user == cfg.admin_user and pw == cfg.admin_password
+    except Exception:
+        return False
+
+
+@app.middleware("http")
+async def _admin_auth_middleware(request: Request, call_next):
+    """只挡 /api/* 设置端点(白名单除外)。
+    /v1/* 转发完全不挡,任意客户端(包括 new-api)直接调用。"""
+    path = request.url.path
+    if path.startswith("/v1/") or path in _AUTH_BYPASS_PATHS:
+        return await call_next(request)
+    if path.startswith("/api/"):
+        if not _check_admin_basic(request):
+            return JSONResponse(
+                {"error": "auth required"},
+                status_code=401,
+                headers={"WWW-Authenticate": 'Basic realm="autorouter"'},
+            )
+    return await call_next(request)
 
 
 # ============================ helpers ============================
@@ -581,6 +621,11 @@ def _serialize(cfg: config_mod.Config) -> dict:
         "connection": {
             "server": {"host": cfg.connection.server.host, "port": cfg.connection.server.port},
             "new_api": {"base_url": cfg.connection.new_api.base_url, "api_key": cfg.connection.new_api.api_key},
+            "admin": {
+                "user": cfg.connection.admin_user,
+                # password 不回显(安全),前端用它判断"是否启用登录"
+                "enabled": bool(cfg.connection.admin_password),
+            },
         },
         "policy": {
             "anti_downgrade":     {"enabled": cfg.policy.anti_downgrade_enabled, "window_seconds": cfg.policy.anti_downgrade_window_seconds},
