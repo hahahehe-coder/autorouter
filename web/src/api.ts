@@ -63,6 +63,7 @@ export interface StrategyData {
 export interface ModelEntry {
   supports_vision?: boolean | null;  // null=未知(capability_gate 不动)
   context_window?: number;
+  upstream?: string;             // 拉取时自动填的供应商名(UI 不编辑)
 }
 export interface MLCfg {
   enabled: boolean;
@@ -78,10 +79,18 @@ export interface AdminCfg {
   user: string;
   enabled: boolean;            // password 是否配了(纯由后端判断)
 }
+export interface ProviderEntry {
+  base_url: string;
+  api_key: string;
+}
 export interface ConnectionCfg {
   server: any;
-  upstream: any;
+  providers: { default: string } & Record<string, ProviderEntry>;
   admin: AdminCfg;
+}
+export interface PullResult {
+  models: Array<{ id: string; upstream: string }>;
+  errors: string[];
 }
 export interface LogFile {
   name: string;
@@ -148,7 +157,7 @@ export const api = {
       body: JSON.stringify(data),
     })),
   reload:        () => json<{ ok: boolean }>(authedFetch('/api/reload', { method: 'POST' })),
-  upstreamModels: () => json<string[]>(authedFetch('/api/models')),
+  upstreamModels: () => json<PullResult>(authedFetch('/api/models')),
   listLogs:      () => json<{files: LogFile[]; log_dir: string}>(authedFetch('/api/logs')),
   readLog:       (name: string) => json<LogContent>(authedFetch(`/api/logs/${encodeURIComponent(name)}`)),
   preview:       (strategy: string, query: string) => json<RoutingPreview>(

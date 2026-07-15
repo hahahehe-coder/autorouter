@@ -195,8 +195,18 @@ def reload_config() -> None:
 
 
 # 模块级常量来自 _CFG(每次请求用最新的)
-def _upstream_base() -> str:
-    return _CFG.connection.upstream.base_url.rstrip("/")
+def _upstream_base(provider_name: str | None = None) -> str:
+    """按名字取上游 base_url;None 或找不到走 default / 第一项。"""
+    p = _CFG.connection.providers.resolve(provider_name)
+    return (p.base_url if p else "").rstrip("/")
+
+
+def _model_upstream(model: str) -> str:
+    """查模型注册表里它来自哪个供应商(空 = 默认)。"""
+    if not model:
+        return ""
+    cfg = _CFG.models.items.get(model)
+    return cfg.upstream if cfg else ""
 
 
 # ============================ FastAPI app ============================
@@ -249,12 +259,21 @@ async def _admin_auth_middleware(request: Request, call_next):
 # ============================ helpers ============================
 
 def _upstream_headers(req: Request) -> dict:
-    """从原始请求透传 Authorization 等到上游回灌。"""
-    h = {"Content-Type": "application/json"}
-    auth = req.headers.get("authorization") or req.headers.get("Authorization")
-    if auth:
-        h["Authorization"] = auth
-    return h
+    """透传 inbound 全部请求头(Host/Content-Length 等 hop-by-hop 自动剔除)。
+
+    客户端发到 AutoRouter 的请求已经按目标协议组装好了头(Authorization、
+    x-api-key、anthropic-version 等),AutoRouter 不解析也不改写。
+    """
+    return {k: v for k, v in req.headers.items()
+            if k.lower() not in _HOP_BY_HOP}
+
+
+# hop-by-hop 头(RFC 7230 §6.1):转发时必须由 httpx/uvicorn 重新生成,不能原样透传。
+_HOP_BY_HOP = frozenset({
+    "host", "content-length", "transfer-encoding", "connection",
+    "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "upgrade", "expect",
+})
 
 
 # ============================ endpoint dispatch ============================
@@ -338,9 +357,9 @@ def _apply_field(endpoint: str, canonical: str, value, body: dict) -> None:
             body["output_config"] = {"effort": value}
 
 
-async def _stream_upstream(path: str, body: dict, headers: dict) -> AsyncGenerator[bytes, None]:
+async def _stream_upstream(path: str, body: dict, headers: dict, model: str = "") -> AsyncGenerator[bytes, None]:
     async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-        async with client.stream("POST", f"{_upstream_base()}{path}", json=body, headers=headers) as resp:
+        async with client.stream("POST", f"{_upstream_base(_model_upstream(model))}{path}", json=body, headers=headers) as resp:
             async for chunk in resp.aiter_bytes():
                 yield chunk
 
@@ -354,6 +373,8 @@ async def health():
         "strategies": list(_CFG.strategies.items.keys()),
         "sessions": _SESSIONS.size(),
         "upstream_base": _upstream_base(),
+        "providers": list(_CFG.connection.providers.items.keys()),
+        "default_provider": _CFG.connection.providers.default,
         "ml": ml_router.status(),
     }
 
@@ -415,7 +436,7 @@ async def _route_and_forward(endpoint: str, request: Request):
     if body.get("stream"):
         async def gen():
             try:
-                async for chunk in _stream_upstream(upstream_path, body, headers):
+                async for chunk in _stream_upstream(upstream_path, body, headers, decision.model):
                     yield chunk
             except httpx.HTTPError as e:
                 logger.error(f"upstream stream error: {e}")
@@ -424,7 +445,7 @@ async def _route_and_forward(endpoint: str, request: Request):
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-            resp = await client.post(f"{_upstream_base()}{upstream_path}", json=body, headers=headers)
+            resp = await client.post(f"{_upstream_base(_model_upstream(decision.model))}{upstream_path}", json=body, headers=headers)
             return JSONResponse(content=resp.json(), status_code=resp.status_code, headers=extra)
     except httpx.HTTPError as e:
         logger.error(f"upstream error on {upstream_path}: {e}")
@@ -545,20 +566,31 @@ async def route_preview(request: Request):
 
 @app.get("/api/models")
 async def pull_upstream_models():
-    """从上游拉 /v1/models(需要 API key)。"""
-    base = _upstream_base()
-    key = _CFG.connection.upstream.api_key
-    if not key:
-        return JSONResponse({"error": "upstream.api_key not configured"}, 400)
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{base}/v1/models", headers={"Authorization": f"Bearer {key}"})
-        if r.status_code != 200:
-            return JSONResponse({"error": f"upstream returned {r.status_code}: {r.text[:200]}"}, 502)
-        data = r.json()
-        return [m["id"] for m in data.get("data", [])]
-    except httpx.HTTPError as e:
-        return JSONResponse({"error": str(e)}, 502)
+    """从每个有 api_key 的供应商拉 /v1/models,合并返回 [{id, upstream}, ...]。
+
+    前端拿到后会把新模型补进注册表(并自动填 upstream tag)。
+    """
+    items = _CFG.connection.providers.items
+    if not items:
+        return JSONResponse({"error": "no providers configured"}, 400)
+    merged: list[dict] = []
+    errors: list[str] = []
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for name, p in items.items():
+            if not p.api_key:
+                continue
+            try:
+                r = await client.get(f"{p.base_url.rstrip('/')}/v1/models",
+                                     headers={"Authorization": f"Bearer {p.api_key}"})
+                if r.status_code != 200:
+                    errors.append(f"{name}: HTTP {r.status_code}")
+                    continue
+                data = r.json()
+                for m in data.get("data", []):
+                    merged.append({"id": m["id"], "upstream": name})
+            except httpx.HTTPError as e:
+                errors.append(f"{name}: {e}")
+    return {"models": merged, "errors": errors}
 
 
 # ============================ 日志查看 API ============================
@@ -620,7 +652,11 @@ def _serialize(cfg: config_mod.Config) -> dict:
     return {
         "connection": {
             "server": {"host": cfg.connection.server.host, "port": cfg.connection.server.port},
-            "upstream": {"base_url": cfg.connection.upstream.base_url, "api_key": cfg.connection.upstream.api_key},
+            "providers": {
+                "default": cfg.connection.providers.default,
+                **{n: {"base_url": p.base_url, "api_key": p.api_key}
+                   for n, p in cfg.connection.providers.items.items()},
+            },
             "admin": {
                 "user": cfg.connection.admin_user,
                 # password 不回显(安全),前端用它判断"是否启用登录"

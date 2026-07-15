@@ -10,20 +10,30 @@
   let pullError = '';
 
   async function pullUpstream() {
-    if (!snapshot?.connection?.upstream?.api_key) {
-      pullError = '请先在「连接」配置 upstream.api_key';
+    const providers = Object.entries(snapshot?.connection?.providers ?? {})
+      .filter(([k, v]) => k !== 'default' && (v as any)?.api_key);
+    if (providers.length === 0) {
+      pullError = '请先在「连接」至少给一个供应商配置 api_key';
       return;
     }
     pulling = true; pullError = '';
     try {
-      const upstream = await api.upstreamModels();
-      // 客户端 merge:新增模型补进注册表(保留已有标注),已删除的模型保留(不自动清)
-      let added = 0;
-      for (const name of upstream) {
-        if (!m[name]) { m[name] = { supports_vision: null, context_window: null }; added++; }
+      const result = await api.upstreamModels();
+      // 客户端 merge:新增模型补进注册表(保留已有标注 + upstream tag),已删的保留。
+      let added = 0, retagged = 0;
+      for (const { id, upstream } of result.models) {
+        if (!m[id]) {
+          m[id] = { supports_vision: null, context_window: null, upstream };
+          added++;
+        } else if (!m[id].upstream && upstream) {
+          m[id].upstream = upstream; retagged++;
+        }
       }
       snapshot = snapshot; onChange();
-      pullError = added ? `新增 ${added} 个模型(请标能力后保存)` : '已是最新';
+      const parts = [`新增 ${added}`];
+      if (retagged) parts.push(`补 tag ${retagged}`);
+      if (result.errors.length) parts.push(`失败 ${result.errors.length} 个供应商`);
+      pullError = added || retagged ? parts.join(',') : (result.errors.length ? result.errors.join('; ') : '已是最新');
     } catch (e: any) {
       pullError = e.message;
     } finally {
@@ -50,7 +60,7 @@
   function addModel() {
     const n = newName.trim();
     if (!n || m[n]) { if (m[n]) alert('已存在'); return; }
-    m[n] = { supports_vision: null, context_window: null };
+    m[n] = { supports_vision: null, context_window: null, upstream: '' };
     newName = '';
     snapshot = snapshot; onChange();
   }
@@ -82,12 +92,19 @@
   {:else}
     <table class="model-table">
       <thead>
-        <tr><th>模型名</th><th>supports_vision</th><th>context_window</th><th></th></tr>
+        <tr><th>模型名</th><th>供应商</th><th>supports_vision</th><th>context_window</th><th></th></tr>
       </thead>
       <tbody>
         {#each modelNames as name}
           <tr>
             <td><code class="mono">{name}</code></td>
+            <td>
+              {#if m[name].upstream}
+                <span class="badge">{m[name].upstream}</span>
+              {:else}
+                <span class="muted">默认</span>
+              {/if}
+            </td>
             <td>
               <select class="mono" value={visionStr(m[name].supports_vision)} on:change={(e) => setVision(name, e)}>
                 <option value="">未知(不动)</option>
@@ -123,4 +140,6 @@
   .model-table th, .model-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); }
   .model-table th { color: var(--ink-3); font-weight: 500; font-size: 13px; }
   .model-table code { background: var(--bg); padding: 2px 6px; border-radius: 4px; }
+  .badge { background: var(--bg); color: var(--ink-2); padding: 2px 8px; border-radius: 4px; font-size: 12px; font-family: var(--mono); }
+  .muted { color: var(--ink-3); font-size: 13px; }
 </style>

@@ -44,14 +44,33 @@ class ServerCfg:
 
 @dataclass
 class UpstreamCfg:
-    base_url: str = "http://127.0.0.1:3000"
+    """单个上游供应商(base_url + API key)。key 在所有 provider 间必须唯一。"""
+    name: str = ""
+    base_url: str = ""
     api_key: str = ""
+
+
+@dataclass
+class ProvidersCfg:
+    """多上游供应商集合。`default` 是缺省回退;模型若带 upstream tag 则按 tag 转发。"""
+    default: str = ""
+    items: dict[str, UpstreamCfg] = field(default_factory=dict)
+
+    def resolve(self, name: str | None) -> UpstreamCfg | None:
+        """按名字找供应商;找不到回退 default;再没有回退 items 第一项。"""
+        if name and name in self.items:
+            return self.items[name]
+        if self.default and self.default in self.items:
+            return self.items[self.default]
+        if self.items:
+            return next(iter(self.items.values()))
+        return None
 
 
 @dataclass
 class ConnectionCfg:
     server: ServerCfg = field(default_factory=ServerCfg)
-    upstream: UpstreamCfg = field(default_factory=UpstreamCfg)
+    providers: ProvidersCfg = field(default_factory=ProvidersCfg)
     # 管理后台登录(仅挡 /api/* 设置端点,/v1/* 转发不受影响)
     # password 留空 = 不启用登录(开发模式默认)
     admin_user: str = "admin"
@@ -121,9 +140,12 @@ class StrategiesCfg:
 
 @dataclass
 class ModelCfg:
-    """单个模型的能力元数据。None=未知(capability_gate 不动)。"""
+    """单个模型的能力元数据。None=未知(capability_gate 不动)。
+    `upstream` 是拉取时自动填的供应商名,转发时按它选上游 — 不在 UI 编辑。
+    """
     supports_vision: bool | None = None
     context_window: int | None = None
+    upstream: str = ""
 
 
 @dataclass
@@ -223,14 +245,43 @@ def _parse_rule(d: dict | None) -> RuleCfg:
 def _parse_connection(d: dict | None) -> ConnectionCfg:
     d = d or {}
     s = d.get("server") or {}
-    n = d.get("upstream") or {}
     a = d.get("admin") or {}
+    providers = _parse_providers(d.get("providers") or _legacy_single_upstream(d))
     return ConnectionCfg(
         server=ServerCfg(host=s.get("host", "127.0.0.1"), port=int(s.get("port", 3001))),
-        upstream=UpstreamCfg(base_url=n.get("base_url", "http://127.0.0.1:3000"), api_key=n.get("api_key", "")),
+        providers=providers,
         admin_user=str(a.get("user", "admin")),
         admin_password=str(a.get("password", "")),
     )
+
+
+def _legacy_single_upstream(d: dict) -> dict:
+    """旧 schema `{upstream: {base_url, api_key}}` 转成新的单 provider 块。"""
+    n = d.get("upstream")
+    if not n:
+        return {}
+    return {"default": "main", "main": {"base_url": n.get("base_url", ""), "api_key": n.get("api_key", "")}}
+
+
+def _parse_providers(d: dict | None) -> ProvidersCfg:
+    """`providers:` 块写法(平铺,推荐):
+        providers:
+          default: main
+          main:       {base_url: ..., api_key: ...}
+          openrouter: {base_url: ..., api_key: ...}
+    也兼容嵌套:`{default: ..., items: {...}}`。`default` 缺省时取第一个。
+    """
+    d = d or {}
+    raw = d.get("items") if isinstance(d.get("items"), dict) else d
+    items: dict[str, UpstreamCfg] = {}
+    for k, v in raw.items():
+        if k == "default" or not isinstance(v, dict):
+            continue
+        items[k] = UpstreamCfg(name=k, base_url=v.get("base_url", ""), api_key=v.get("api_key", ""))
+    default_name = str(raw.get("default", "")) if isinstance(raw, dict) else ""
+    if not default_name and items:
+        default_name = next(iter(items))
+    return ProvidersCfg(default=default_name, items=items)
 
 
 def _parse_policy(d: dict | None) -> PolicyCfg:
@@ -280,7 +331,8 @@ def _parse_strategies(d: dict | None) -> StrategiesCfg:
 
 
 def _parse_models(d: dict | None) -> ModelsCfg:
-    """models.yaml 顶层就是 {模型名: {supports_vision, context_window}}(无 'models:' 包装)。
+    """models.yaml 顶层就是 {模型名: {supports_vision, context_window, upstream}}(无 'models:' 包装)。
+    `upstream` 是供应商名,拉取时自动填,转发按它路由。无值时回退默认供应商。
     顶层任何 dict 值的键都被当作模型名;非 dict 值(如顶层是 list/str)忽略。"""
     d = d or {}
     items: dict[str, ModelCfg] = {}
@@ -289,9 +341,11 @@ def _parse_models(d: dict | None) -> ModelsCfg:
             continue
         sv = md.get("supports_vision")
         cw = md.get("context_window")
+        up = md.get("upstream") or ""
         items[name] = ModelCfg(
             supports_vision=None if sv is None else bool(sv),
             context_window=int(cw) if cw is not None else None,
+            upstream=str(up),
         )
     return ModelsCfg(items=items)
 
