@@ -248,11 +248,8 @@ async def _admin_auth_middleware(request: Request, call_next):
         return await call_next(request)
     if path.startswith("/api/"):
         if not _check_admin_basic(request):
-            return JSONResponse(
-                {"error": "auth required"},
-                status_code=401,
-                headers={"WWW-Authenticate": 'Basic realm="autorouter"'},
-            )
+            # 故意不带 WWW-Authenticate:避免浏览器弹原生登录框,SPA 的 LoginScreen 处理。
+            return JSONResponse({"error": "auth required"}, status_code=401)
     return await call_next(request)
 
 
@@ -566,9 +563,10 @@ async def route_preview(request: Request):
 
 @app.get("/api/models")
 async def pull_upstream_models():
-    """从每个有 api_key 的供应商拉 /v1/models,合并返回 [{id, upstream}, ...]。
+    """从每个有 api_key 的供应商拉模型列表,合并返回 [{id, upstream}, ...]。
 
     前端拿到后会把新模型补进注册表(并自动填 upstream tag)。
+    base_url 已含 `/v1` 时直接拼 `/models`,否则补 `/v1`(兼容 new-api 风格的裸地址)。
     """
     items = _CFG.connection.providers.items
     if not items:
@@ -579,11 +577,12 @@ async def pull_upstream_models():
         for name, p in items.items():
             if not p.api_key:
                 continue
+            base = p.base_url.rstrip("/")
+            url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
             try:
-                r = await client.get(f"{p.base_url.rstrip('/')}/v1/models",
-                                     headers={"Authorization": f"Bearer {p.api_key}"})
+                r = await client.get(url, headers={"Authorization": f"Bearer {p.api_key}"})
                 if r.status_code != 200:
-                    errors.append(f"{name}: HTTP {r.status_code}")
+                    errors.append(f"{name}: HTTP {r.status_code} {r.text[:120]}")
                     continue
                 data = r.json()
                 for m in data.get("data", []):
