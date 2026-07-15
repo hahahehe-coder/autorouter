@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import atexit
 import base64
+import copy
+import json
 import logging
 import logging.handlers as logging_handlers
 import os
@@ -17,11 +19,11 @@ from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from queue import Queue
-from typing import AsyncGenerator
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from . import config as config_mod
 from . import ml_router
@@ -201,6 +203,17 @@ def _upstream_base(provider_name: str | None = None) -> str:
     return (p.base_url if p else "").rstrip("/")
 
 
+def _upstream_url(provider_name: str | None, path: str) -> str:
+    """把 provider base_url 和标准 `/v1/...` 路径拼成一个且仅一个 `/v1`。"""
+    base = _upstream_base(provider_name)
+    if not base:
+        raise ValueError("no upstream provider configured")
+    path = "/" + path.lstrip("/")
+    if base.endswith("/v1") and (path == "/v1" or path.startswith("/v1/")):
+        path = path[3:] or "/"
+    return f"{base}{path}"
+
+
 def _model_upstream(model: str) -> str:
     """查模型注册表里它来自哪个供应商(空 = 默认)。"""
     if not model:
@@ -265,6 +278,15 @@ def _upstream_headers(req: Request) -> dict:
             if k.lower() not in _HOP_BY_HOP}
 
 
+def _request_auth_identity(req: Request) -> str:
+    """会话只按认证信息识别；没有认证信息时禁用会话锁。"""
+    authorization = req.headers.get("authorization", "")
+    api_key = req.headers.get("x-api-key", "")
+    if not authorization and not api_key:
+        return ""
+    return f"authorization={authorization}|x-api-key={api_key}"
+
+
 # hop-by-hop 头(RFC 7230 §6.1):转发时必须由 httpx/uvicorn 重新生成,不能原样透传。
 _HOP_BY_HOP = frozenset({
     "host", "content-length", "transfer-encoding", "connection",
@@ -277,39 +299,83 @@ _HOP_BY_HOP = frozenset({
 
 EP_CHAT, EP_MESSAGES, EP_RESPONSES = "chat/completions", "messages", "responses"
 
+_TEXT_PART_TYPES = frozenset(("text", "input_text", "output_text"))
+_IMAGE_PART_TYPES = frozenset(("image", "image_url", "input_image"))
+
+
+def _router_content(content):
+    """把各端点原生 content 归一化给路由器；不会修改实际转发 body。"""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        part_type = part.get("type")
+        if part_type in _TEXT_PART_TYPES:
+            parts.append({"type": "text", "text": str(part.get("text") or "")})
+        elif part_type in _IMAGE_PART_TYPES:
+            # 路由器只需要知道存在图片，不需要复制图片数据。
+            parts.append({"type": "image_url"})
+    return parts
+
+
+def _normalized_message(message: dict) -> dict | None:
+    if not isinstance(message, dict):
+        return None
+    role = message.get("role")
+    if not role:
+        return None
+    return {"role": role, "content": _router_content(message.get("content", ""))}
+
 
 def _endpoint_user_text(endpoint: str, body: dict) -> str:
     """从各端点 body 抽出用户文本,给 classifier 用。"""
-    if endpoint in (EP_CHAT, EP_MESSAGES):
-        for m in reversed(body.get("messages") or []):
-            if m.get("role") == "user":
-                c = m.get("content")
-                if isinstance(c, str): return c
-                if isinstance(c, list):
-                    for b in c:
-                        if isinstance(b, dict) and b.get("type") == "text":
-                            return b.get("text", "")
-    elif endpoint == EP_RESPONSES:
-        inp = body.get("input")
-        if isinstance(inp, str): return inp
-        if isinstance(inp, list) and inp:
-            last = inp[-1]
-            if isinstance(last, dict):
-                c = last.get("content")
-                if isinstance(c, str): return c
-                if isinstance(c, list):
-                    for b in c:
-                        if isinstance(b, dict) and b.get("type") == "text":
-                            return b.get("text", "")
+    for message in reversed(_messages_for_router(endpoint, body)):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(
+                str(part.get("text") or "") for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            ).strip()
     return ""
 
 
 def _messages_for_router(endpoint: str, body: dict) -> list:
-    """归一化成 messages[] 给 router.classify_with_messages 用。"""
+    """归一化成 messages[] 给路由器用；转发仍使用未经改写的原始 body。"""
     if endpoint in (EP_CHAT, EP_MESSAGES):
-        return body.get("messages") or []
-    text = _endpoint_user_text(EP_RESPONSES, body)
-    return [{"role": "user", "content": text}] if text else []
+        result = []
+        for message in body.get("messages") or []:
+            normalized = _normalized_message(message)
+            if normalized is not None:
+                result.append(normalized)
+        return result
+
+    inp = body.get("input")
+    if isinstance(inp, str):
+        return [{"role": "user", "content": inp}]
+    if not isinstance(inp, list):
+        return []
+
+    result = []
+    loose_parts = []
+    for item in inp:
+        if not isinstance(item, dict):
+            continue
+        normalized = _normalized_message(item)
+        if normalized is not None:
+            result.append(normalized)
+        elif item.get("type") in _TEXT_PART_TYPES | _IMAGE_PART_TYPES:
+            loose_parts.append(item)
+    if loose_parts:
+        result.append({"role": "user", "content": _router_content(loose_parts)})
+    return result
 
 
 def _set_chat_system(body: dict, system_text: str) -> None:
@@ -354,11 +420,40 @@ def _apply_field(endpoint: str, canonical: str, value, body: dict) -> None:
             body["output_config"] = {"effort": value}
 
 
-async def _stream_upstream(path: str, body: dict, headers: dict, model: str = "") -> AsyncGenerator[bytes, None]:
-    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-        async with client.stream("POST", f"{_upstream_base(_model_upstream(model))}{path}", json=body, headers=headers) as resp:
-            async for chunk in resp.aiter_bytes():
-                yield chunk
+def _response_headers(headers: httpx.Headers, extra: dict | None = None) -> dict:
+    """保留上游 end-to-end 响应头，剔除必须由当前连接重新生成的头。"""
+    result = {k: v for k, v in headers.items() if k.lower() not in _HOP_BY_HOP}
+    if extra:
+        result.update(extra)
+    return result
+
+
+async def _close_stream(response: httpx.Response, client: httpx.AsyncClient) -> None:
+    await response.aclose()
+    await client.aclose()
+
+
+async def _forward_stream(
+    url: str, headers: dict, extra: dict | None = None, *,
+    json_body: dict | None = None, content: bytes | None = None,
+) -> Response:
+    """建立上游流后再返回客户端，原样传播状态、响应头和原始字节。"""
+    client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+    try:
+        request = client.build_request(
+            "POST", url, json=json_body, content=content, headers=headers,
+        )
+        upstream = await client.send(request, stream=True)
+    except (httpx.HTTPError, ValueError) as exc:
+        await client.aclose()
+        logger.error(f"upstream stream error: {exc}")
+        return JSONResponse({"error": f"upstream unreachable: {exc}"}, status_code=502)
+    return StreamingResponse(
+        upstream.aiter_raw(),
+        status_code=upstream.status_code,
+        headers=_response_headers(upstream.headers, extra),
+        background=BackgroundTask(_close_stream, upstream, client),
+    )
 
 
 # ============================ 公共路由 ============================
@@ -400,7 +495,7 @@ async def _route_and_forward(endpoint: str, request: Request):
     messages = _messages_for_router(endpoint, body)
     text = _endpoint_user_text(endpoint, body)
 
-    session_key = compute_session_key(headers.get("Authorization", ""), messages)
+    session_key = compute_session_key(_request_auth_identity(request), messages)
     prev_idx = _SESSIONS.get_previous_idx(session_key, _CFG.policy.anti_downgrade_window_seconds)
 
     # ML 推理是 CPU 密集(~50-200ms),放线程池避免阻塞事件循环(启发式廉价,同步也无妨,统一走 to_thread)
@@ -431,20 +526,25 @@ async def _route_and_forward(endpoint: str, request: Request):
     }
 
     if body.get("stream"):
-        async def gen():
-            try:
-                async for chunk in _stream_upstream(upstream_path, body, headers, decision.model):
-                    yield chunk
-            except httpx.HTTPError as e:
-                logger.error(f"upstream stream error: {e}")
-                yield b'data: {"error":"upstream unreachable"}\n\n'
-        return StreamingResponse(gen(), media_type="text/event-stream", headers=extra)
+        try:
+            url = _upstream_url(_model_upstream(decision.model), upstream_path)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=502)
+        return await _forward_stream(url, headers, extra, json_body=body)
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-            resp = await client.post(f"{_upstream_base(_model_upstream(decision.model))}{upstream_path}", json=body, headers=headers)
-            return JSONResponse(content=resp.json(), status_code=resp.status_code, headers=extra)
-    except httpx.HTTPError as e:
+            async with client.stream(
+                "POST", _upstream_url(_model_upstream(decision.model), upstream_path),
+                json=body, headers=headers,
+            ) as resp:
+                content = b"".join([chunk async for chunk in resp.aiter_raw()])
+                return Response(
+                    content=content,
+                    status_code=resp.status_code,
+                    headers=_response_headers(resp.headers, extra),
+                )
+    except (httpx.HTTPError, ValueError) as e:
         logger.error(f"upstream error on {upstream_path}: {e}")
         return JSONResponse({"error": f"upstream unreachable: {e}"}, status_code=502)
 
@@ -470,18 +570,22 @@ async def responses_endpoint(request: Request):
 
 async def _transparent_post(path: str, request: Request) -> Response:
     body_bytes = await request.body()
-    headers = dict(request.headers)
-    headers.pop("host", None)
-    headers.pop("content-length", None)
+    headers = _upstream_headers(request)
+    model = ""
+    try:
+        payload = json.loads(body_bytes)
+        if isinstance(payload, dict):
+            model = str(payload.get("model") or "")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
     logger.info(f"passthrough /v1/{path} ({len(body_bytes)} bytes)")
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-            upstream = await client.post(f"{_upstream_base()}/v1/{path}", content=body_bytes, headers=headers)
-        return StreamingResponse(
-            iter([upstream.content]), status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type", "application/json"),
+        return await _forward_stream(
+            _upstream_url(_model_upstream(model), f"/v1/{path}"),
+            headers,
+            content=body_bytes,
         )
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, ValueError) as e:
         logger.error(f"upstream error on /v1/{path}: {e}")
         return JSONResponse({"error": str(e)}, status_code=502)
 
@@ -494,10 +598,52 @@ async def transparent(path: str, request: Request):
 
 # ============================ 管理员 API ============================
 
+def _prepare_section_data(section: str, data: dict) -> dict:
+    """规范化 UI 快照；未显式提交的敏感字段沿用磁盘值。"""
+    if not isinstance(data, dict):
+        raise ValueError(f"section '{section}' must be an object")
+    prepared = copy.deepcopy(data)
+    if section != "connection":
+        return prepared
+
+    current = _load_section_raw("connection") or {}
+    current_admin = current.get("admin") or {}
+    admin = dict(prepared.get("admin") or {})
+    admin.pop("enabled", None)
+    if "password" not in admin:
+        admin["password"] = current_admin.get("password", "")
+    elif admin["password"] is None:
+        admin["password"] = ""
+    prepared["admin"] = admin
+    return prepared
+
 @app.get("/api/config")
 async def get_config_all():
     """合并后的全量(给 /api/route/preview + 完整快照用)。"""
     return _serialize(_CFG)
+
+
+@app.put("/api/config")
+async def put_config_all(request: Request):
+    """一次校验并保存完整/部分配置快照，避免跨 section 的中间无效状态。"""
+    incoming = await request.json()
+    if not isinstance(incoming, dict):
+        return JSONResponse({"error": "config payload must be an object"}, 400)
+    try:
+        updates = {
+            section: _prepare_section_data(section, incoming[section])
+            for section in config_mod.SECTIONS if section in incoming
+        }
+        if not updates:
+            raise ValueError("no known config sections supplied")
+        config_mod.validate_updates(updates, _config_dir())
+        config_mod.save_sections(updates, _config_dir())
+        reload_config()
+    except ValueError as e:
+        return JSONResponse({"error": f"validation failed: {e}"}, 400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, 500)
+    return {"ok": True}
 
 
 @app.get("/api/config/{section}")
@@ -516,7 +662,9 @@ async def put_config_section(section: str, request: Request):
         return JSONResponse({"error": f"unknown section '{section}'"}, 404)
     new_data = await request.json()
     try:
-        config_mod.save_section(section, new_data)
+        new_data = _prepare_section_data(section, new_data)
+        config_mod.validate_updates({section: new_data}, _config_dir())
+        config_mod.save_section(section, new_data, _config_dir())
         reload_config()    # 全量重载 + 跨文件校验
     except ValueError as e:
         return JSONResponse({"error": f"validation failed: {e}"}, 400)
@@ -577,17 +725,17 @@ async def pull_upstream_models():
         for name, p in items.items():
             if not p.api_key:
                 continue
-            base = p.base_url.rstrip("/")
-            url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
             try:
+                url = _upstream_url(name, "/v1/models")
                 r = await client.get(url, headers={"Authorization": f"Bearer {p.api_key}"})
                 if r.status_code != 200:
                     errors.append(f"{name}: HTTP {r.status_code} {r.text[:120]}")
                     continue
                 data = r.json()
                 for m in data.get("data", []):
-                    merged.append({"id": m["id"], "upstream": name})
-            except httpx.HTTPError as e:
+                    if isinstance(m, dict) and m.get("id"):
+                        merged.append({"id": m["id"], "upstream": name})
+            except (httpx.HTTPError, ValueError, json.JSONDecodeError) as e:
                 errors.append(f"{name}: {e}")
     return {"models": merged, "errors": errors}
 
@@ -697,6 +845,7 @@ def _serialize(cfg: config_mod.Config) -> dict:
             n: {
                 "supports_vision": m.supports_vision,
                 "context_window": m.context_window,
+                "upstream": m.upstream,
             }
             for n, m in cfg.models.items.items()
         },

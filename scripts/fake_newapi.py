@@ -1,5 +1,5 @@
 """fake_newapi.py — 极简 mock new-api,只接 POST ,回一段假响应 + 真 usage。
-本机测试时启动它替代 127.0.0.1:3000,验证 auto_router 的回灌链路。"""
+本机测试时启动它替代真实上游,验证 AutoRouter 的转发链路。"""
 import os
 import time
 import json

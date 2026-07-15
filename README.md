@@ -8,7 +8,7 @@
 
 部署在客户端和上游 LLM 服务之间,接收 `POST /v1/{chat,messages,responses}`,按请求内容选择下游模型,改写 `body.model` 后转发到上游。
 
-**典型用例**:多个模型(便宜/中等/最强)的池子里,把 trivial 查询落到便宜模型、heavy/code 落到强模型,自动省成本。**支持多个 OpenAI 兼容的上游**(new-api / OpenRouter / 直连 Anthropic 等),按模型来源自动选供应商转发。
+**典型用例**:多个模型(便宜/中等/最强)的池子里,把 trivial 查询落到便宜模型、heavy/code 落到强模型,自动省成本。支持配置多个上游,按模型来源自动选择供应商。请求体除策略声明的覆盖字段外保持不变,上游响应状态、响应头和响应字节直接透传。
 
 ### 核心特性
 
@@ -51,6 +51,7 @@ uv sync --extra ml               # 含 ML(开启 classifier 模式必须)
 # 2. 编辑 config/connection.yaml
 #   providers: 列出所有上游供应商(new-api / OpenRouter / 直连 Anthropic 等)
 #     `default`: 模型没 tag 时走这个;每个供应商一条 name + base_url + api_key
+#     api_key 仅用于后台拉模型;推理请求的认证头由调用方提供并原样透传
 #   admin.password:  留空 = 关闭登录;填上 = 启用 Basic Auth
 
 # 3. 启动
@@ -63,9 +64,24 @@ uv run uvicorn app.channel:app --host 0.0.0.0 --port 3001
 - 实时路由测试:管理界面 → 「策略」tab → LiveTest(不调上游,只跑路由管道)
 - 日志查看:管理界面 → 「日志」tab
 
+仓库已经包含预构建的 `web/dist`,普通用户不需要安装 Node.js。只有修改管理界面源码时才需要重新构建:
+
+```bash
+cd web
+npm ci
+npm run check
+npm run build
+```
+
+发布前回归测试:
+
+```bash
+uv run --no-sync python -m unittest discover -s tests -v
+```
+
 ### 第一次配置流程
 
-1. **「连接」tab**:列每个上游供应商的 `name + base_url + api_key`,选一个作 `default`;可选填 `admin.password` → 保存
+1. **「连接」tab**:列每个上游供应商的 `name + base_url + api_key`,选一个作 `default`;`api_key` 只用于拉模型,推理认证头由客户端提供 → 保存
 2. **「模型」tab**:点击「拉取上游」拉模型列表 → 给每个模型勾选 supports_vision / 填 context_window → 保存
 3. **「策略」tab**:增删策略、配置每个 strategy 的 kind 和 4 档 rules(选刚才注册的模型) → 保存
 4. **「ML」tab**:选 classifier 模式必设;rule 模式可空
@@ -160,6 +176,8 @@ admin:
 ```
 
 启用后,所有 `/api/*` 设置端点要求 `Authorization: Basic base64(user:pass)`,`/v1/*` 转发完全不受影响,SPA 启动后弹 LoginScreen,凭证存 localStorage,toolbar 有「退出」按钮。
+
+`/v1/*` 是否对公网开放由部署者决定。普通用户只在本机使用时建议监听 `127.0.0.1`;公开部署时请配合防火墙或外部网关控制访问。
 
 ⚠️ **生产建议**:yaml 里是明文密码,推荐改成 hash 校验(`hashlib.pbkdf2_hmac`)。
 
@@ -262,6 +280,7 @@ app/                   # 核心 Python 模块
 config/                # 6 个 yaml 配置(connection/strategies/policy/observability/models/ml)
 web/                   # Svelte SPA(管理界面)
 scripts/               # 压测 + 离线 mock + admin 响应检查
+tests/                 # 配置事务、多供应商和端点透传回归测试
 models/                # OpenSquilla 预训练权重(只读)
 log/                   # 运行时 daily 日志(永不删)
 ```

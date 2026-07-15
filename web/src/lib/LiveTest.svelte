@@ -54,9 +54,6 @@
 档位     <code>{preview.rule_idx}</code>
 模型     <code>{preview.model}</code>
 置信度   <code>{(preview.confidence ?? 0).toFixed(2)}</code>
-{#if Object.keys(preview.inference ?? {}).length > 0}
-inference <code>{JSON.stringify(preview.inference)}</code>
-{/if}
 
 策略链:
 {#each preview.policies as p}

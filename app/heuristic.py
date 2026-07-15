@@ -59,6 +59,12 @@ def context_signals(messages: list | None) -> tuple[int, bool]:
         c = m.get("content", "") if isinstance(m, dict) else ""
         if isinstance(c, str):
             full += "\n" + c
+        elif isinstance(c, list):
+            for part in c:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") in ("text", "input_text", "output_text"):
+                    full += "\n" + str(part.get("text") or "")
     zh = sum(1 for ch in full if "一" <= ch <= "鿿")
     en = sum(1 for ch in full if ch.isascii() and ch.isalpha())
     material_tokens = int(zh / 1.5 + en / 0.75)
@@ -67,7 +73,9 @@ def context_signals(messages: list | None) -> tuple[int, bool]:
         c = m.get("content") if isinstance(m, dict) else None
         if isinstance(c, list):
             for part in c:
-                if isinstance(part, dict) and part.get("type") == "image_url":
+                if isinstance(part, dict) and part.get("type") in (
+                    "image", "image_url", "input_image",
+                ):
                     has_image = True
                     break
     return material_tokens, has_image

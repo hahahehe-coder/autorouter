@@ -24,6 +24,7 @@ class PolicyCtx:
     rules_count: int = 0
     previous_idx: int | None = None       # 上次会话命中的 rule index
     message_text: str = ""
+    complaint_max_chars: int = 160
     force: bool = False
     # ML 置信度门(confidence_gate 用);启发式默认 confidence=1.0、threshold=0.0 → 不触发
     confidence: float = 1.0
@@ -75,7 +76,7 @@ def complaint_upgrade(idx: int, ctx: PolicyCtx) -> tuple[int, bool, str]:
     terms = ["nonsense", "wrong", "useless", "terrible", "garbage", "stupid",
              "胡扯", "胡说", "废话", "没用", "错", "蠢"]
     text = (ctx.message_text or "").strip().lower()
-    if not text or len(text) > 160:
+    if not text or len(text) > ctx.complaint_max_chars:
         return idx, False, ""
     if not any(t in text for t in terms):
         return idx, False, ""

@@ -3,9 +3,8 @@
 __pycache__/
 *.pyc
 
-# 前端构建产物 / 依赖
+# 前端依赖；web/dist 作为发布时管理界面的一部分入库
 web/node_modules/
-web/dist/
 
 # 运行时日志(宿主挂载,不入库)
 log/

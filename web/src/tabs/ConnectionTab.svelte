@@ -45,6 +45,15 @@
     }
     snapshot = snapshot; onChange();
   }
+  function setAdminPassword(value: string) {
+    c.admin.password = value;
+    c.admin.enabled = !!value;
+    snapshot = snapshot; onChange();
+  }
+  function disableAdminAuth() {
+    if (!confirm('关闭管理 API 登录保护?公开部署不建议关闭。')) return;
+    setAdminPassword('');
+  }
   // 给每行生成一个稳定 id,key 改时不重渲染
   function rowId(_name: string, _i: number) { return _i; }
 </script>
@@ -52,7 +61,7 @@
 <div class="page-head">
   <h1>连接</h1>
   <p>本服务监听 + 多个上游 LLM 供应商。每个模型从哪个供应商拉来就自动走哪个供应商转发(没有 tag 的走默认)。</p>
-  <p class="muted">支持 OpenAI 兼容接口(new-api / OpenRouter / 直连 Anthropic 等);同一供应商下所有模型共享一个 key。</p>
+  <p class="muted">推理请求的认证头会原样透传；这里的 api_key 只用于“拉取上游模型”。</p>
 </div>
 
 <div class="card">
@@ -99,6 +108,24 @@
     </div>
   {/each}
   <button class="btn btn-secondary" on:click={addProvider}>+ 加供应商</button>
+</div>
+
+<div class="card">
+  <h2 class="card-head-line">管理后台登录</h2>
+  <div class="field">
+    <label class="field-label">用户名</label>
+    <input class="mono" value={c.admin.user} readonly />
+  </div>
+  <div class="field">
+    <label class="field-label">新密码</label>
+    <div class="field-help">留空并保存会保留现有密码；只有输入新值才会修改。</div>
+    <input class="mono" type="password" value="" autocomplete="new-password"
+           placeholder={c.admin.enabled ? '已启用，留空保持不变' : '当前未启用'}
+           on:change={(e) => { const value = v(e); if (value) setAdminPassword(value); }} />
+  </div>
+  {#if c.admin.enabled}
+    <button class="btn btn-danger" on:click={disableAdminAuth}>关闭登录保护</button>
+  {/if}
 </div>
 
 <style>

@@ -5,7 +5,7 @@
     之后所有 api.* 调用自动带 Authorization: Basic 头。
     后端中间件:password 空 → 不挡;非空 → 需要 Basic Auth。
   */
-  import { setAuth, getAuthB64, onAuthChange } from '../api';
+  import { setAuth, clearAuth, getAuthB64, onAuthChange } from '../api';
 
   let user = '';
   let password = '';
@@ -28,10 +28,10 @@
     try {
       const r = await fetch('/api/config', { headers: { 'Authorization': `Basic ${getAuthB64()}` } });
       if (r.status === 401) {
-        setAuth('', '');   // 清掉
+        clearAuth();
         error = '用户名或密码错误';
       } else if (!r.ok) {
-        setAuth('', '');
+        clearAuth();
         error = `登录失败 (HTTP ${r.status})`;
       } else {
         error = '';

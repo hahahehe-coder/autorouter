@@ -5,6 +5,8 @@
   export let snapshot: ConfigSnapshot;
   export let onChange: () => void = () => {};
   $: m = snapshot.models ?? (snapshot.models = {});
+  $: providerNames = Object.keys(snapshot.connection?.providers ?? {})
+    .filter((name) => name !== 'default').sort();
 
   let pulling = false;
   let pullError = '';
@@ -49,6 +51,10 @@
   function setContextWindow(name: string, e: Event) {
     const v = inputVal(e);
     m[name].context_window = v === '' ? null : parseInt(v);
+    snapshot = snapshot; onChange();
+  }
+  function setUpstream(name: string, e: Event) {
+    m[name].upstream = selVal(e);
     snapshot = snapshot; onChange();
   }
   function removeModel(name: string) {
@@ -99,11 +105,12 @@
           <tr>
             <td><code class="mono">{name}</code></td>
             <td>
-              {#if m[name].upstream}
-                <span class="badge">{m[name].upstream}</span>
-              {:else}
-                <span class="muted">默认</span>
-              {/if}
+              <select class="mono" value={m[name].upstream ?? ''} on:change={(e) => setUpstream(name, e)}>
+                <option value="">默认</option>
+                {#each providerNames as provider}
+                  <option value={provider}>{provider}</option>
+                {/each}
+              </select>
             </td>
             <td>
               <select class="mono" value={visionStr(m[name].supports_vision)} on:change={(e) => setVision(name, e)}>

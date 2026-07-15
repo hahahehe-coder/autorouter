@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -198,7 +199,20 @@ class Config:
 def validate(cfg: Config) -> None:
     if not cfg.strategies.items:
         raise ValueError("strategies must define at least one strategy")
+    providers = cfg.connection.providers
+    if providers.default and providers.default not in providers.items:
+        raise ValueError(f"default provider '{providers.default}' is not configured")
+    for name, provider in providers.items.items():
+        if not name:
+            raise ValueError("provider name must not be empty")
+        if not provider.base_url:
+            raise ValueError(f"provider '{name}': base_url is required")
     reg = cfg.models.items
+    for model_name, model in reg.items():
+        if model.upstream and model.upstream not in providers.items:
+            raise ValueError(
+                f"model '{model_name}': upstream provider '{model.upstream}' is not configured"
+            )
     for n, s in cfg.strategies.items.items():
         if s.kind not in ("single", "rule", "classifier"):
             raise ValueError(f"strategy '{n}': kind must be single/rule/classifier, got '{s.kind}'")
@@ -256,8 +270,8 @@ def _parse_connection(d: dict | None) -> ConnectionCfg:
 
 
 def _legacy_single_upstream(d: dict) -> dict:
-    """旧 schema `{upstream: {base_url, api_key}}` 转成新的单 provider 块。"""
-    n = d.get("upstream")
+    """旧 schema `{new_api|upstream: {base_url, api_key}}` 转成单 provider 块。"""
+    n = d.get("upstream") or d.get("new_api")
     if not n:
         return {}
     return {"default": "main", "main": {"base_url": n.get("base_url", ""), "api_key": n.get("api_key", "")}}
@@ -272,13 +286,14 @@ def _parse_providers(d: dict | None) -> ProvidersCfg:
     也兼容嵌套:`{default: ..., items: {...}}`。`default` 缺省时取第一个。
     """
     d = d or {}
-    raw = d.get("items") if isinstance(d.get("items"), dict) else d
+    nested = isinstance(d.get("items"), dict)
+    raw = d.get("items") if nested else d
     items: dict[str, UpstreamCfg] = {}
     for k, v in raw.items():
         if k == "default" or not isinstance(v, dict):
             continue
         items[k] = UpstreamCfg(name=k, base_url=v.get("base_url", ""), api_key=v.get("api_key", ""))
-    default_name = str(raw.get("default", "")) if isinstance(raw, dict) else ""
+    default_name = str(d.get("default", "")) if nested else str(raw.get("default", ""))
     if not default_name and items:
         default_name = next(iter(items))
     return ProvidersCfg(default=default_name, items=items)
@@ -383,34 +398,81 @@ def load_section(name: str, config_dir: Path) -> dict | None:
     return _yaml_load(config_dir / f"{name}.yaml")
 
 
-def load_all(config_dir: Path | str | None = None) -> Config:
+def _resolve_config_dir(config_dir: Path | str | None = None) -> Path:
     if config_dir is None:
         config_dir = Path(os.getenv("CONFIG_DIR", "config"))
-    config_dir = Path(config_dir)
+    return Path(config_dir)
+
+
+def load_raw_sections(config_dir: Path | str | None = None) -> dict[str, dict | None]:
+    config_dir = _resolve_config_dir(config_dir)
 
     for sec in REQUIRED_SECTIONS:
         if not (config_dir / f"{sec}.yaml").exists():
             raise FileNotFoundError(f"Required config file missing: {config_dir / (sec + '.yaml')}")
+    return {sec: load_section(sec, config_dir) for sec in SECTIONS}
 
-    present = {sec: load_section(sec, config_dir) for sec in SECTIONS}
 
+def build_config(present: dict[str, dict | None]) -> Config:
+    """从内存中的全部 YAML section 构造并校验 Config。"""
     cfg = Config(
-        connection=_parse_connection(present["connection"]),
-        strategies=_parse_strategies(present["strategies"]) if present["strategies"] else StrategiesCfg(),
-        policy=_parse_policy(present["policy"]),
-        observability=_parse_observability(present["observability"]),
-        ml=_parse_ml(present["ml"]),
-        models=_parse_models(present["models"]),
+        connection=_parse_connection(present.get("connection")),
+        strategies=_parse_strategies(present.get("strategies")) if present.get("strategies") else StrategiesCfg(),
+        policy=_parse_policy(present.get("policy")),
+        observability=_parse_observability(present.get("observability")),
+        ml=_parse_ml(present.get("ml")),
+        models=_parse_models(present.get("models")),
     )
     validate(cfg)
     return cfg
 
 
+def load_all(config_dir: Path | str | None = None) -> Config:
+    return build_config(load_raw_sections(config_dir))
+
+
+def validate_updates(
+    updates: dict[str, dict], config_dir: Path | str | None = None,
+) -> Config:
+    """把待保存 section 合并到磁盘快照，在写盘前做完整跨文件校验。"""
+    unknown = set(updates) - set(SECTIONS)
+    if unknown:
+        raise ValueError(f"unknown config sections: {', '.join(sorted(unknown))}")
+    present = load_raw_sections(config_dir)
+    present.update(updates)
+    return build_config(present)
+
+
+def _atomic_yaml_write(path: Path, data: dict) -> None:
+    """同目录临时文件写完并 fsync 后原子替换正式 YAML。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent,
+            prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as f:
+            tmp_name = f.name
+            yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        if tmp_name and Path(tmp_name).exists():
+            Path(tmp_name).unlink()
+
+
 def save_section(name: str, data: dict, config_dir: Path | str | None = None) -> None:
-    if config_dir is None:
-        config_dir = Path(os.getenv("CONFIG_DIR", "config"))
-    config_dir = Path(config_dir)
-    config_dir.mkdir(parents=True, exist_ok=True)
-    path = config_dir / f"{name}.yaml"
-    with path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    if name not in SECTIONS:
+        raise ValueError(f"unknown config section '{name}'")
+    config_dir = _resolve_config_dir(config_dir)
+    _atomic_yaml_write(config_dir / f"{name}.yaml", data)
+
+
+def save_sections(
+    sections: dict[str, dict], config_dir: Path | str | None = None,
+) -> None:
+    """保存一组已经整体校验过的 section；每个文件都使用原子替换。"""
+    config_dir = _resolve_config_dir(config_dir)
+    for name, data in sections.items():
+        save_section(name, data, config_dir)

@@ -62,7 +62,7 @@ export interface StrategyData {
 }
 export interface ModelEntry {
   supports_vision?: boolean | null;  // null=未知(capability_gate 不动)
-  context_window?: number;
+  context_window?: number | null;
   upstream?: string;             // 拉取时自动填的供应商名(UI 不编辑)
 }
 export interface MLCfg {
@@ -78,6 +78,7 @@ export interface ObservabilityCfg {
 export interface AdminCfg {
   user: string;
   enabled: boolean;            // password 是否配了(纯由后端判断)
+  password?: string;           // 仅提交新密码时出现;后端不会回显
 }
 export interface ProviderEntry {
   base_url: string;
@@ -149,6 +150,12 @@ function authedFetch(path: string, init?: RequestInit): Promise<Response> {
 export const api = {
   health:        () => json<any>(fetch(`${BASE}/health`)),
   getAll:        () => json<ConfigSnapshot>(authedFetch('/api/config')),
+  putAll:        (data: ConfigSnapshot) => json<{ ok: boolean }>(
+    authedFetch('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    })),
   getSection:    (s: string) => json<any>(authedFetch(`/api/config/${s}`)),
   putSection:    (s: string, data: any) => json<{ ok: boolean }>(
     authedFetch(`/api/config/${s}`, {

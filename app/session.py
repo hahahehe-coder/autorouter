@@ -1,26 +1,20 @@
 """
-SessionStore — 内存字典,key=hash(auth+msg_prefix),存上次 tier+时间戳。
+SessionStore — 内存字典,key=hash(auth),存上次 tier+时间戳。
 anti_downgrade 用来判断"同一会话"的上一档。惰性淘汰 TTL 条目。
 """
 from __future__ import annotations
 
 import hashlib
-import json
 import threading
 import time
 
 
 def compute_session_key(auth: str, messages: list) -> str:
-    """
-    OpenSquilla 风格:hash auth + messages 前缀(去掉最后 2 条)。
-    前缀相同 = 同一会话 — 比纯 api_key 准(同一用户多会话可区分)。
-    """
+    """相同认证信息视为同一会话；无认证请求不启用 anti_downgrade。"""
+    if not auth:
+        return ""
     h = hashlib.sha256()
-    h.update((auth or "").encode("utf-8"))
-    h.update(b"|")
-    if isinstance(messages, list) and len(messages) > 0:
-        prefix = messages[:-2] if len(messages) > 2 else []
-        h.update(json.dumps(prefix, sort_keys=True, default=str).encode("utf-8"))
+    h.update(auth.encode("utf-8"))
     return h.hexdigest()[:16]
 
 
@@ -49,7 +43,12 @@ class SessionStore:
         if not key or idx < 0:
             return
         with self._lock:
-            self._data[key] = (idx, time.time())
+            now = time.time()
+            expired = [k for k, (_, ts) in self._data.items()
+                       if now - ts > self._default_window]
+            for old_key in expired:
+                self._data.pop(old_key, None)
+            self._data[key] = (idx, now)
 
     def size(self) -> int:
         with self._lock:

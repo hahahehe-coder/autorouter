@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, type ConfigSnapshot, getAuthB64, clearAuth, onAuth401 } from './api';
+  import { api, type ConfigSnapshot, getAuthB64, setAuth, clearAuth, onAuth401 } from './api';
   import StrategiesTab from './tabs/StrategiesTab.svelte';
   import PolicyTab from './tabs/PolicyTab.svelte';
   import ObservabilityTab from './tabs/ObservabilityTab.svelte';
@@ -75,16 +75,21 @@
   async function save() {
     if (!snapshot) return;
     saveError = ''; saveOk = '';
-    if (dirtySections.has('connection'))    await api.putSection('connection',    snapshot.connection);
-    if (dirtySections.has('policy'))        await api.putSection('policy',        snapshot.policy);
-    if (dirtySections.has('strategies'))    await api.putSection('strategies',    snapshot.strategies);
-    if (dirtySections.has('observability')) await api.putSection('observability', snapshot.observability);
-    if (dirtySections.has('ml'))            await api.putSection('ml',            snapshot.ml);
-    if (dirtySections.has('modelconfig'))   await api.putSection('models',        snapshot.models);
-    try { await api.reload(); } catch {}
-    dirtySections = new Set();
-    saveOk = '已保存并立即生效';
-    snapshot = await api.getAll();
+    try {
+      const pendingPassword = snapshot.connection.admin.password;
+      const adminUser = snapshot.connection.admin.user;
+      await api.putAll(snapshot);
+      if (pendingPassword !== undefined) {
+        if (pendingPassword) setAuth(adminUser, pendingPassword);
+        else clearAuth();
+        delete snapshot.connection.admin.password;
+      }
+      dirtySections = new Set();
+      saveOk = '已保存并立即生效';
+      snapshot = await api.getAll();
+    } catch (e: any) {
+      saveError = '保存失败: ' + (e?.message || e);
+    }
   }
 
   async function reloadFromDisk() {
@@ -130,7 +135,7 @@
   </aside>
 
   <main class="main">
-    {#if !showTabs}
+    {#if !showTabs || !snapshot}
       <LoginScreen promptMessage={loginPrompt} onLogin={handleLogin} />
     {:else if activeTab === 'connection'}
       <ConnectionTab bind:snapshot={snapshot} onChange={onChangeFromTab} />
