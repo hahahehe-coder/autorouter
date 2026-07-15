@@ -10,8 +10,8 @@
   let pullError = '';
 
   async function pullUpstream() {
-    if (!snapshot?.connection?.new_api?.api_key) {
-      pullError = '请先在「连接」配置 new_api.api_key';
+    if (!snapshot?.connection?.upstream?.api_key) {
+      pullError = '请先在「连接」配置 upstream.api_key';
       return;
     }
     pulling = true; pullError = '';
@@ -68,7 +68,7 @@
 
 <div class="card" style="margin-bottom: 16px;">
   <h2 class="card-head-line">拉取上游模型</h2>
-  <p class="muted" style="margin: 0 0 10px;">从 new-api 拉模型列表,新增的会补进注册表(已有标注保留);删除上游不会自动从注册表移除。</p>
+  <p class="muted" style="margin: 0 0 10px;">从上游拉模型列表,新增的会补进注册表(已有标注保留);删除上游不会自动从注册表移除。</p>
   <button class="btn btn-secondary" on:click={pullUpstream} disabled={pulling}>
     {pulling ? '拉取中…' : '拉取上游'}
   </button>

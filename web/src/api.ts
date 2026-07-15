@@ -80,7 +80,7 @@ export interface AdminCfg {
 }
 export interface ConnectionCfg {
   server: any;
-  new_api: any;
+  upstream: any;
   admin: AdminCfg;
 }
 export interface LogFile {

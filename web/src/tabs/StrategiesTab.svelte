@@ -152,7 +152,7 @@
 
 <div class="page-head">
   <h1>策略</h1>
-  <p>每个策略对应 new-api 后台 channel "模型"字段里的一个名字。用户请求 model=&lt;名&gt; 时走对应规则。</p>
+  <p>每个策略对应上游后台 channel "模型"字段里的一个名字。用户请求 model=&lt;名&gt; 时走对应规则。</p>
 </div>
 
 <LiveTest availableStrategies={names} />

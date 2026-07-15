@@ -6,9 +6,9 @@
 
 ## 这是什么
 
-部署在 new-api 和客户端之间,接收 `POST /v1/{chat,messages,responses}`,按请求内容选择下游模型,改写 `body.model` 后转发到上游 new-api。
+部署在客户端和上游 LLM 服务之间,接收 `POST /v1/{chat,messages,responses}`,按请求内容选择下游模型,改写 `body.model` 后转发到上游。
 
-**典型用例**:多个模型(便宜/中等/最强)的池子里,把 trivial 查询落到便宜模型、heavy/code 落到强模型,自动省成本。
+**典型用例**:多个模型(便宜/中等/最强)的池子里,把 trivial 查询落到便宜模型、heavy/code 落到强模型,自动省成本。**支持任何 OpenAI 兼容的上游**(new-api / OpenRouter / 直连 Anthropic 等),只改 `connection.yaml` 的 `upstream.base_url` 即可。
 
 ### 核心特性
 
@@ -23,12 +23,12 @@
 ### 架构
 
 ```
-浏览器 / new-api 客户端
+浏览器 / LLM 客户端
       │
       ▼
    ┌─────────────────┐
    │   AutoRouter    │── /v1/* 转发到
-   │   (:3001)       │── 上游 :3000 (new-api)
+   │   (:3001)       │── 上游(OpenAI 兼容接口)
    │                 │
    │  ML bundle + 启发式 + 策略链 │
    └─────────────────┘
@@ -37,7 +37,7 @@
    管理界面 (Svelte SPA)
 ```
 
-每条请求流:`user → autorouter → 路由决策 → 改写 body.model → 转发到 new-api → 回灌`。
+每条请求流:`user → autorouter → 路由决策 → 改写 body.model → 转发到上游 → 回灌`。
 
 ---
 
@@ -49,7 +49,7 @@ uv sync                          # 基础(纯 rule/heuristic 模式)
 uv sync --extra ml               # 含 ML(开启 classifier 模式必须)
 
 # 2. 编辑 config/connection.yaml
-#   new_api.base_url: 上游地址(如 http://127.0.0.1:3000)
+#   upstream.base_url: 上游地址(任何 OpenAI 兼容服务,如 http://127.0.0.1:3000)
 #   admin.password:  留空 = 关闭登录;填上 = 启用 Basic Auth
 
 # 3. 启动
@@ -64,7 +64,7 @@ uv run uvicorn app.channel:app --host 0.0.0.0 --port 3001
 
 ### 第一次配置流程
 
-1. **「连接」tab**:填上游 `new_api.base_url` 和 `api_key`,可选填 `admin.password` → 保存
+1. **「连接」tab**:填上游 `upstream.base_url` 和 `api_key`,可选填 `admin.password` → 保存
 2. **「模型」tab**:点击「拉取上游」拉模型列表 → 给每个模型勾选 supports_vision / 填 context_window → 保存
 3. **「策略」tab**:增删策略、配置每个 strategy 的 kind 和 4 档 rules(选刚才注册的模型) → 保存
 4. **「ML」tab**:选 classifier 模式必设;rule 模式可空
@@ -101,7 +101,7 @@ confidence_gate → chitchat_only → complaint → anti_downgrade
 
 | 文件 | 含义 |
 |---|---|
-| `connection.yaml` | 本服务监听 + 上游 new-api base_url + API key + admin 登录 |
+| `connection.yaml` | 本服务监听 + 上游 base_url + API key + admin 登录 |
 | `strategies.yaml` | 路由策略(single / rule / classifier 三种 kind) |
 | `policy.yaml` | 策略链开 + 阈值(anti_downgrade window / LC floor / 等) |
 | `observability.yaml` | **只一项**:`log_dir`(默认 `./log`) |
@@ -204,7 +204,7 @@ uv run uvicorn scripts.fake_newapi:app \
   --workers 4
 ```
 
-生产 replace `connection.yaml` 的 `new_api.base_url` 指真上游。
+生产 replace `connection.yaml` 的 `upstream.base_url` 指真上游。
 
 ### 内存需求(主要:ML bundle)
 
@@ -240,7 +240,7 @@ uv run uvicorn scripts.fake_newapi:app \
 |---|---|
 | 日志没出来 | 检查 `log_dir` 是否可写;查看 listener 线程是否在(`/health` 看 `ml.status=ready`) |
 | 路由全去 glm-5.2 | 看 `log/auto_router-*.log` 里 `conf=` 多大,可能 ML 持续低置信走 fallback |
-| 转发 502/404 | 验证 `connection.yaml.base_url`;确认 new-api 上有对应模型 |
+| 转发 502/404 | 验证 `connection.yaml.upstream.base_url`;确认上游有对应模型 |
 | 内存涨不停 | 每个 worker 300-400 MB 是正常;不停涨说明 listener 卡了或 reload 死循环 |
 | 单 query 延迟 10s+ | 多数 8 worker 跑 200 并发的情况;减并发或加 worker |
 | 改 yaml 不生效 | POST `/api/reload`;观察 stdout "Reloaded. N strategies" |
@@ -291,7 +291,7 @@ app/
 
 `config/`:
 ```
-connection.yaml   # host/port + 上游 new-api + admin 登录
+connection.yaml   # host/port + 上游 + admin 登录
 strategies.yaml   # 路由策略
 policy.yaml       # 策略链开 + 阈值
 observability.yaml# log_dir
@@ -314,7 +314,7 @@ src/tabs/
 
 `scripts/`:
 ```
-fake_newapi.py          # 离线 mock new-api
+fake_newapi.py          # 离线 mock 上游(仅测试)
 load_test.py            # 100 并发压测
 load_test_200.py        # 200 并发压测
 check_admin_response.py # 验证 /api/config 不回显 password

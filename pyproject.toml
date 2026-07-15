@@ -1,7 +1,7 @@
 [project]
 name = "auto-router"
 version = "0.1.0"
-description = "new-api 伪渠道:接 model=auto → LLMRouter 选模型 → 回灌 new-api"
+description = "LLM 伪渠道:接 model=auto → 路由选模型 → 回灌上游(支持任何 OpenAI 兼容接口)"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.110",

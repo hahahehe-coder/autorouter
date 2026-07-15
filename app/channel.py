@@ -195,8 +195,8 @@ def reload_config() -> None:
 
 
 # 模块级常量来自 _CFG(每次请求用最新的)
-def _new_api_base() -> str:
-    return _CFG.connection.new_api.base_url.rstrip("/")
+def _upstream_base() -> str:
+    return _CFG.connection.upstream.base_url.rstrip("/")
 
 
 # ============================ FastAPI app ============================
@@ -232,7 +232,7 @@ def _check_admin_basic(request: Request) -> bool:
 @app.middleware("http")
 async def _admin_auth_middleware(request: Request, call_next):
     """只挡 /api/* 设置端点(白名单除外)。
-    /v1/* 转发完全不挡,任意客户端(包括 new-api)直接调用。"""
+    /v1/* 转发完全不挡,任意客户端直接调用。"""
     path = request.url.path
     if path.startswith("/v1/") or path in _AUTH_BYPASS_PATHS:
         return await call_next(request)
@@ -249,7 +249,7 @@ async def _admin_auth_middleware(request: Request, call_next):
 # ============================ helpers ============================
 
 def _upstream_headers(req: Request) -> dict:
-    """从 new-api 透传 Authorization 等到回灌请求。"""
+    """从原始请求透传 Authorization 等到上游回灌。"""
     h = {"Content-Type": "application/json"}
     auth = req.headers.get("authorization") or req.headers.get("Authorization")
     if auth:
@@ -340,7 +340,7 @@ def _apply_field(endpoint: str, canonical: str, value, body: dict) -> None:
 
 async def _stream_upstream(path: str, body: dict, headers: dict) -> AsyncGenerator[bytes, None]:
     async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-        async with client.stream("POST", f"{_new_api_base()}{path}", json=body, headers=headers) as resp:
+        async with client.stream("POST", f"{_upstream_base()}{path}", json=body, headers=headers) as resp:
             async for chunk in resp.aiter_bytes():
                 yield chunk
 
@@ -353,14 +353,14 @@ async def health():
         "status": "ok",
         "strategies": list(_CFG.strategies.items.keys()),
         "sessions": _SESSIONS.size(),
-        "new_api_base": _new_api_base(),
+        "upstream_base": _upstream_base(),
         "ml": ml_router.status(),
     }
 
 
 @app.get("/v1/models")
 async def list_models_strategy():
-    """列出策略名(让 new-api 后台发现 channel 支持哪些模型)"""
+    """列出策略名(让上游后台发现 channel 支持哪些模型)"""
     return {
         "object": "list",
         "data": [
@@ -424,7 +424,7 @@ async def _route_and_forward(endpoint: str, request: Request):
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-            resp = await client.post(f"{_new_api_base()}{upstream_path}", json=body, headers=headers)
+            resp = await client.post(f"{_upstream_base()}{upstream_path}", json=body, headers=headers)
             return JSONResponse(content=resp.json(), status_code=resp.status_code, headers=extra)
     except httpx.HTTPError as e:
         logger.error(f"upstream error on {upstream_path}: {e}")
@@ -458,7 +458,7 @@ async def _transparent_post(path: str, request: Request) -> Response:
     logger.info(f"passthrough /v1/{path} ({len(body_bytes)} bytes)")
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-            upstream = await client.post(f"{_new_api_base()}/v1/{path}", content=body_bytes, headers=headers)
+            upstream = await client.post(f"{_upstream_base()}/v1/{path}", content=body_bytes, headers=headers)
         return StreamingResponse(
             iter([upstream.content]), status_code=upstream.status_code,
             media_type=upstream.headers.get("content-type", "application/json"),
@@ -545,16 +545,16 @@ async def route_preview(request: Request):
 
 @app.get("/api/models")
 async def pull_upstream_models():
-    """从 new-api 拉 /v1/models(需要 API key)。"""
-    base = _new_api_base()
-    key = _CFG.connection.new_api.api_key
+    """从上游拉 /v1/models(需要 API key)。"""
+    base = _upstream_base()
+    key = _CFG.connection.upstream.api_key
     if not key:
-        return JSONResponse({"error": "new_api.api_key not configured"}, 400)
+        return JSONResponse({"error": "upstream.api_key not configured"}, 400)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(f"{base}/v1/models", headers={"Authorization": f"Bearer {key}"})
         if r.status_code != 200:
-            return JSONResponse({"error": f"new-api returned {r.status_code}: {r.text[:200]}"}, 502)
+            return JSONResponse({"error": f"upstream returned {r.status_code}: {r.text[:200]}"}, 502)
         data = r.json()
         return [m["id"] for m in data.get("data", [])]
     except httpx.HTTPError as e:
@@ -620,7 +620,7 @@ def _serialize(cfg: config_mod.Config) -> dict:
     return {
         "connection": {
             "server": {"host": cfg.connection.server.host, "port": cfg.connection.server.port},
-            "new_api": {"base_url": cfg.connection.new_api.base_url, "api_key": cfg.connection.new_api.api_key},
+            "upstream": {"base_url": cfg.connection.upstream.base_url, "api_key": cfg.connection.upstream.api_key},
             "admin": {
                 "user": cfg.connection.admin_user,
                 # password 不回显(安全),前端用它判断"是否启用登录"
