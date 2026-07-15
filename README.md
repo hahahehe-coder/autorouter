@@ -1,95 +1,231 @@
+[简体中文](README.md) | [English](README.en.md)
+
 # AutoRouter
 
-> FastAPI 伪 channel:把 LLM 请求按内容智能路由到多个模型(基于 ML 路由 + 启发式 + 策略链)。
+> **让合适的任务，自动交给合适的模型。**
 
----
+**简单任务少花钱，复杂任务不将就。**
 
-## 这是什么
+还在根据任务难度手动切换模型？
 
-部署在客户端和上游 LLM 服务之间,接收 `POST /v1/{chat,messages,responses}`,按请求内容选择下游模型,改写 `body.model` 后转发到上游。
+日常问答没必要每次都调用最昂贵的模型，编程、复杂推理和长上下文任务也不该交给能力不足的模型。但模型越来越多，靠自己反复判断任务难度、切换模型，不仅麻烦，也很难兼顾效果和成本。
 
-**典型用例**:多个模型(便宜/中等/最强)的池子里,把 trivial 查询落到便宜模型、heavy/code 落到强模型,自动省成本。支持配置多个上游,按模型来源自动选择供应商。请求体除策略声明的覆盖字段外保持不变,上游响应状态、响应头和响应字节直接透传。
+AutoRouter 就是为了解决这个问题。
 
-### 核心特性
+它借鉴 [OpenSquilla](https://github.com/opensquilla/opensquilla) 的模型路由设计，结合 ML 分类、启发式规则和后处理策略，分析每次请求的内容与复杂程度，自动选择更合适的模型：
 
-- **ML 路由层**:基于 OpenSquilla v4.2 bundle(LightGBM + BGE/ONNX,390 维特征),即开即用,ML 不可用时自动降级到启发式
-- **3 种路由模式**:`single`(固定模型)、`rule`(启发式 band)、`classifier`(ML)。旧名 `static`/`heuristic` 作别名
-- **5 步策略链**:chitchat_only / 抱怨升档 / 抗降档(会话锁高档)/ capability_gate(图片/上下文约束升档)/ large_context_floor(超大上下文强制高档)
-- **模型注册表**:`models.yaml` 集中标能力(supports_vision/context_window),capability_gate 按名查;策略 rule 的 model 必须在注册表里才有效(后端强制)
-- **三端点支持**:`/v1/chat/completions` / `/v1/messages` / `/v1/responses`,每端点字段映射(thinking 用各自的 endpoint-native 名字)
-- **每日滚动日志**:`auto_router-YYYY-MM-DD.log` 按本地日期切,异步 write(QueueHandler + 后台 listener),永不删
-- **管理 UI**:Svelte SPA,通过 `/api/config/*` 编辑所有 yaml 配置,reload 即时生效;**Basic Auth** 守 `/api/*`(密码空 = 关闭),`/v1/*` 转发完全开放
+- 日常问答优先使用快速、实惠的模型
+- 编程任务自动切换到更擅长代码的模型
+- 复杂推理调用能力更强的模型
+- 图片和长上下文请求自动匹配具备相应能力的模型
+- ML 不可用时自动回退到启发式路由，不影响正常请求
 
-### 架构
+你不再需要提前判断任务有多难，也不用在多个模型之间来回切换。
 
+> **你只管提问，模型选择交给 AutoRouter。**
+
+## 少花不必要的钱，也不让困难任务降级
+
+如果所有请求都调用最强模型，当然省心，但大量简单任务会产生不必要的费用；如果始终使用便宜模型，遇到编程、推理和复杂分析时，回答效果又可能不够理想。
+
+AutoRouter 会动态分配模型：让高性价比模型处理它擅长的简单任务，让强模型专注于真正困难的问题，在使用效果和 API 成本之间取得更合理的平衡。
+
+**省掉的是不必要的模型成本，保留的是复杂任务真正需要的能力。**
+
+## API 站长和普通用户都能使用
+
+| 使用者 | 如何接入 | 能得到什么 |
+|---|---|---|
+| **API 中转站站长** | 将 AutoRouter 部署到服务器，再增加一个渠道 | 把多个不同价格、不同能力的模型组合成统一的自动选模入口，无需改变用户习惯 |
+| **普通用户** | 在本机启动 AutoRouter，把聊天客户端或开发工具的 API 地址指向本地服务 | 继续使用原来的客户端，日常问答、写代码和复杂分析都不必再手动换模型 |
+
+一次配置，之后每次请求都能自动选择。
+
+## 一个入口，连接多个模型和上游
+
+AutoRouter 位于客户端和上游 LLM 服务之间。客户端只需要连接 AutoRouter，后续请求由它完成分析、选模和转发。
+
+```text
+浏览器 / LLM 客户端 / API 中转站
+              │
+              ▼
+       ┌─────────────────┐
+       │   AutoRouter    │
+       │ ML + 规则 + 策略链 │
+       └─────────────────┘
+          │      │      │
+          ▼      ▼      ▼
+       上游 A  上游 B  上游 C
+       便宜模型 代码模型 强力模型
 ```
-浏览器 / LLM 客户端
-      │
-      ▼
-   ┌─────────────────┐
-   │   AutoRouter    │── /v1/* 转发到
-   │   (:3001)       │── 上游(OpenAI 兼容接口)
-   │                 │
-   │  ML bundle + 启发式 + 策略链 │
-   └─────────────────┘
-      ▲
-      │  /api/* 管理 API(Basic Auth 守门)
-   管理界面 (Svelte SPA)
+
+每条请求的处理流程：
+
+```text
+接收请求 → 分析任务 → 选择档位 → 检查图片/上下文等能力 → 改写配置字段 → 转发上游
 ```
 
-每条请求流:`user → autorouter → 路由决策 → 改写 body.model → 转发到上游 → 回灌`。
+实际转发时，除策略明确配置的 `model`、`max_tokens`、`system`、`thinking` 等覆盖字段外，其他请求参数和认证头保持不变；上游的响应状态、响应头和响应字节直接返回客户端。
 
----
+## 核心能力
+
+- **智能模型路由**：基于 OpenSquilla v4.2 bundle（LightGBM + BGE/ONNX，390 维特征）判断任务难度
+- **三种路由模式**：`single` 固定模型、`rule` 启发式分类、`classifier` ML 分类
+- **多层路由保护**：置信度回退、闲聊限制、抱怨升档、会话抗降档、模型能力检查和大上下文升档
+- **多上游供应商**：按模型的 `upstream` 标签自动选择目标供应商
+- **多端点支持**：`/v1/chat/completions`、`/v1/messages`、`/v1/responses`，其他 `/v1/*` 请求透明转发
+- **模型能力注册表**：集中管理视觉支持和上下文窗口，策略引用无效模型时拒绝保存
+- **可视化管理后台**：在浏览器中配置连接、模型、策略、ML、后处理和日志，保存后立即生效
+- **可靠降级**：ML 依赖或模型不可用时自动回退到启发式路由
+- **异步每日滚动日志**：路由决策写入按日期区分的日志文件
+
+**一个入口，多个模型，自动选择。**
 
 ## 快速开始
 
+### 1. 安装并启动
+
 ```bash
-# 1. 安装
-uv sync                          # 基础(纯 rule/heuristic 模式)
-uv sync --extra ml               # 含 ML(开启 classifier 模式必须)
+# 纯规则路由（rule 模式）
+uv sync
 
-# 2. 编辑 config/connection.yaml
-#   providers: 列出所有上游供应商(new-api / OpenRouter / 直连 Anthropic 等)
-#     `default`: 模型没 tag 时走这个;每个供应商一条 name + base_url + api_key
-#     api_key 仅用于后台拉模型;推理请求的认证头由调用方提供并原样透传
-#   admin.password:  留空 = 关闭登录;填上 = 启用 Basic Auth
+# 使用 ML 分类路由（classifier 模式）
+uv sync --extra ml
 
-# 3. 启动
-uv run uvicorn app.channel:app --host 0.0.0.0 --port 3001
+# 普通用户仅在本机使用
+uv run uvicorn app.channel:app --host 127.0.0.1 --port 3001
+
+# 服务器部署时改为监听所有网卡
+# uv run uvicorn app.channel:app --host 0.0.0.0 --port 3001
 ```
 
-启动后:
-- 管理界面:`http://<host>:3001/`
-- 健康检查:`curl http://<host>:3001/health`
-- 实时路由测试:管理界面 → 「策略」tab → LiveTest(不调上游,只跑路由管道)
-- 日志查看:管理界面 → 「日志」tab
+启动后打开管理界面：`http://127.0.0.1:3001/`。仓库已经包含预构建的 `web/dist`，普通用户不需要安装 Node.js。
 
-仓库已经包含预构建的 `web/dist`,普通用户不需要安装 Node.js。只有修改管理界面源码时才需要重新构建:
+### 2. 配置上游供应商
+
+推荐在管理界面的「连接」页添加供应商。每个供应商包含以下信息：
+
+| 字段 | 作用 |
+|---|---|
+| 供应商名称 | AutoRouter 内部使用的唯一标识，例如 `opencode`、`openrouter`；模型通过这个名称绑定上游 |
+| `base_url` | 上游 API 地址，可以填写 `https://api.example.com` 或 `https://api.example.com/v1` |
+| `api_key` | 仅供管理后台从该供应商的 `/v1/models` 拉取模型；留空时跳过该供应商 |
+| `default` | 未指定 `upstream` 的模型以及无法识别模型来源的请求使用哪个供应商 |
+
+也可以直接编辑 `config/connection.yaml`：
+
+```yaml
+server:
+  host: 127.0.0.1
+  port: 3001
+
+providers:
+  default: opencode
+  opencode:
+    base_url: https://opencode.ai/zen/v1
+    api_key: "<OpenCode Zen API Key>"
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key: "<OpenRouter API Key>"
+
+admin:
+  user: admin
+  password: ""  # 留空关闭管理登录；公开部署前请设置强密码
+```
+
+> **认证说明：**`providers.*.api_key` 不会被用于推理。AutoRouter 会把客户端请求中的 `Authorization`、`x-api-key` 及其他协议请求头透传给最终选中的供应商，因此客户端或前置 API 站需要提供目标供应商能够接受的认证信息。
+
+上面的配置分别使用了 [OpenCode Zen](https://opencode.ai/docs/zen/) 和 [OpenRouter](https://openrouter.ai/docs/api/reference/overview) 的 OpenAI 兼容地址。供应商名称只是 AutoRouter 内部标识，可以自行修改，但模型的 `upstream` 必须使用相同名称。
+
+### 3. 拉取模型并绑定供应商
+
+进入管理界面的「模型」页，点击「拉取上游」：
+
+> ⚠️ **提示：**如果上游提供的模型较多，建议先在上游筛选后再点击「拉取上游」，否则可能一次拉取大量模型。例如 OpenRouter 一次可能返回 **400+ 个模型**。
+
+1. AutoRouter 会查询所有填写了 `api_key` 的供应商。
+2. 拉到的模型会自动记录来源供应商，即模型的 `upstream`。
+3. 为模型补充 `supports_vision` 和 `context_window`，供图片和长上下文策略判断。
+4. 保存模型配置。
+
+如果供应商不支持 `/v1/models`，可以在界面中手动添加，或直接编辑 `config/models.yaml`：
+
+```yaml
+cheap-model:
+  supports_vision: false
+  context_window: 128000
+  upstream: opencode
+
+code-model:
+  supports_vision: false
+  context_window: 200000
+  upstream: openrouter
+
+strong-model:
+  supports_vision: true
+  context_window: 1000000
+  upstream: openrouter
+```
+
+`upstream` 必须与 `connection.yaml` 中的供应商名称一致；不填写时，该模型会使用 `providers.default`。
+
+### 4. 创建自动路由策略
+
+进入「策略」页创建一个策略，例如 `auto`，再为不同难度选择刚刚注册的模型。首次使用建议先选 `rule` 模式；安装了 ML 依赖后可改为 `classifier`。
+
+对应的 `config/strategies.yaml` 示例：
+
+```yaml
+auto:
+  kind: rule
+  rules:
+  - model: cheap-model   # R0：闲聊等简单任务
+    max_tokens: 4096
+    thinking: off
+  - model: cheap-model   # R1：普通任务
+  - model: code-model    # R2：编程等较难任务
+    thinking: medium
+  - model: strong-model  # R3：复杂推理任务
+    thinking: high
+```
+
+请求时将 `model` 填为策略名称 `auto`。AutoRouter 会先选择档位，再把它改写成对应的真实模型名称并转发到该模型绑定的供应商。
+
+### 5. 发送第一个请求
+
+下面以 OpenAI 兼容的 Chat Completions 请求为例。使用 `-i` 可以同时查看 `X-Auto-Routed-To` 等路由结果响应头：
+
+```bash
+curl -i http://127.0.0.1:3001/v1/chat/completions \
+  -H "Authorization: Bearer <推理请求使用的 API Key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","messages":[{"role":"user","content":"写一个归并排序并解释时间复杂度"}]}'
+```
+
+还可以通过以下入口检查运行状态：
+
+- 健康检查：`http://127.0.0.1:3001/health`
+- 路由测试：管理界面 → 「策略」→ LiveTest（只运行路由流程，不调用上游）
+- 路由日志：管理界面 → 「日志」
+
+### 开发与发布检查
+
+只有修改管理界面源码时才需要安装 Node.js 并重新构建：
 
 ```bash
 cd web
 npm ci
 npm run check
 npm run build
-```
 
-发布前回归测试:
-
-```bash
+# 回到仓库根目录运行后端回归测试
+cd ..
 uv run --no-sync python -m unittest discover -s tests -v
 ```
 
-### 第一次配置流程
-
-1. **「连接」tab**:列每个上游供应商的 `name + base_url + api_key`,选一个作 `default`;`api_key` 只用于拉模型,推理认证头由客户端提供 → 保存
-2. **「模型」tab**:点击「拉取上游」拉模型列表 → 给每个模型勾选 supports_vision / 填 context_window → 保存
-3. **「策略」tab**:增删策略、配置每个 strategy 的 kind 和 4 档 rules(选刚才注册的模型) → 保存
-4. **「ML」tab**:选 classifier 模式必设;rule 模式可空
-5. **「后处理」tab**:策略链开关 + 阈值
-
 ---
 
-## 关键概念(60 秒读完)
+## 关键概念
 
 ### 路由模式
 
@@ -99,7 +235,7 @@ uv run --no-sync python -m unittest discover -s tests -v
 | `rule` | 启发式 band(长度+代码),确定性,idx 0-3 → rules[idx] |
 | `classifier` | ML 分类器输出 idx 0-3,ML 不可用自动降级到 `rule` |
 
-### 策略链(默认 5 步按序执行)
+### 策略链（默认 6 步按序执行）
 
 ```
 confidence_gate → chitchat_only → complaint → anti_downgrade
@@ -273,7 +409,7 @@ uv run uvicorn scripts.fake_newapi:app \
 app/                   # 核心 Python 模块
   channel.py           # FastAPI 入口 + 路由 + 日志配置 + admin 中间件
   router.py            # 顶层路由函数
-  policy.py            # 5 步策略链
+  policy.py            # 6 步策略链
   heuristic.py         # 启发式 band
   ml_router.py         # ML 路由层(惰性)
   ml/                  # ML 内部(移植自 opensquilla)
