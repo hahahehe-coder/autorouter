@@ -230,6 +230,26 @@ from fastapi.staticfiles import StaticFiles
 app = FastAPI(title="auto-router pseudo channel", version="2.0.0")
 
 
+# ============================ path 归一化中间件 ============================
+
+@app.middleware("http")
+async def _normalize_path(request: Request, call_next):
+    """折叠连续斜杠 + 去末尾斜杠,让 `/v1/models/`、`//v1/models` 等变体都能命中路由。
+
+    new-api 这类渠道后台在拼 `{baseURL}/v1/models` 时不做末尾斜杠 trim,
+    AutoRouter 默认 404,触发上游「拉取模型」失败返回 500。
+    改动只动 request.scope["path"]、不重写 URL,纯 ASGI 层语义对齐。
+    """
+    path = request.scope.get("path", "")
+    if "//" in path or (len(path) > 1 and path.endswith("/")):
+        normalized = re.sub(r"/+", "/", path) or "/"
+        if len(normalized) > 1 and normalized.endswith("/"):
+            normalized = normalized[:-1]
+        if normalized != path:
+            request.scope["path"] = normalized
+    return await call_next(request)
+
+
 # ============================ admin auth 中间件 ============================
 
 # 不需要 admin auth 的路径(白名单):健康检查
@@ -273,9 +293,36 @@ def _upstream_headers(req: Request) -> dict:
 
     客户端发到 AutoRouter 的请求已经按目标协议组装好了头(Authorization、
     x-api-key、anthropic-version 等),AutoRouter 不解析也不改写。
+
+    嵌套 new-api 用法:渠道配置加 `X-Original-Auth: {client_header:Authorization}`,
+    new-api 转发时把原用户 token 塞到这个头里。AutoRouter 转发到上游(通常又是 new-api)
+    时用它覆盖 Authorization,让上游看到用户的真 token → per-user 计费归属。
+    没有 X-Original-Auth 就保持原样透传(直接客户端场景不受影响)。
     """
-    return {k: v for k, v in req.headers.items()
-            if k.lower() not in _HOP_BY_HOP}
+    headers = {k.lower(): v for k, v in req.headers.items()
+               if k.lower() not in _HOP_BY_HOP}
+    orig_auth = headers.pop("x-original-auth", None)
+    if orig_auth:
+        # 小写 key 避免和 req.headers.items() 的小写 key 重复
+        headers["authorization"] = orig_auth
+    # DEBUG: 临时调试 — 看 X-Original-Auth 交换状态。token 脱敏只显示前 8 字符。
+    logger.info(
+        "hdr.swap in_auth=%s xoa=%s out_auth=%s",
+        _redact_token(req.headers.get("authorization", "")),
+        _redact_token(orig_auth or ""),
+        _redact_token(headers.get("authorization", "")),
+    )
+    return headers
+
+
+def _redact_token(value: str) -> str:
+    """DEBUG: 'Bearer <前8位>...';空值显式标 (none) 便于排查。"""
+    if not value:
+        return "(none)"
+    parts = value.split(" ", 1)
+    if len(parts) == 2 and len(parts[1]) > 8:
+        return f"{parts[0]} {parts[1][:8]}..."
+    return value[:8] + "..."
 
 
 def _request_auth_identity(req: Request) -> str:
@@ -798,7 +845,6 @@ def _serialize(cfg: config_mod.Config) -> dict:
         return d
     return {
         "connection": {
-            "server": {"host": cfg.connection.server.host, "port": cfg.connection.server.port},
             "providers": {
                 "default": cfg.connection.providers.default,
                 **{n: {"base_url": p.base_url, "api_key": p.api_key}
@@ -864,12 +910,3 @@ if _os.path.isdir(_SPA_DIR):
     # 否则 StaticFiles 会先匹配并打到 404。
     app.mount("/", StaticFiles(directory=_SPA_DIR, html=True), name="spa")
     logger.info(f"SPA mounted from {_SPA_DIR}")
-
-
-# ============================ main ============================
-
-if __name__ == "__main__":
-    import uvicorn
-    host = _CFG.connection.server.host
-    port = _CFG.connection.server.port
-    uvicorn.run(app, host=host, port=port, log_level="info")

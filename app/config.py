@@ -38,12 +38,6 @@ REQUIRED_SECTIONS = frozenset({"strategies"})
 # ============================================================
 
 @dataclass
-class ServerCfg:
-    host: str = "127.0.0.1"
-    port: int = 3001
-
-
-@dataclass
 class UpstreamCfg:
     """单个上游供应商(base_url + API key)。key 在所有 provider 间必须唯一。"""
     name: str = ""
@@ -70,7 +64,6 @@ class ProvidersCfg:
 
 @dataclass
 class ConnectionCfg:
-    server: ServerCfg = field(default_factory=ServerCfg)
     providers: ProvidersCfg = field(default_factory=ProvidersCfg)
     # 管理后台登录(仅挡 /api/* 设置端点,/v1/* 转发不受影响)
     # password 留空 = 不启用登录(开发模式默认)
@@ -258,11 +251,9 @@ def _parse_rule(d: dict | None) -> RuleCfg:
 
 def _parse_connection(d: dict | None) -> ConnectionCfg:
     d = d or {}
-    s = d.get("server") or {}
     a = d.get("admin") or {}
     providers = _parse_providers(d.get("providers") or _legacy_single_upstream(d))
     return ConnectionCfg(
-        server=ServerCfg(host=s.get("host", "127.0.0.1"), port=int(s.get("port", 3001))),
         providers=providers,
         admin_user=str(a.get("user", "admin")),
         admin_password=str(a.get("password", "")),

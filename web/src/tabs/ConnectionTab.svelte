@@ -16,10 +16,6 @@
       ? defaultName
       : (providerEntries[0]?.[0] ?? '');
 
-  function server(field: string, val: string) {
-    (c.server as any)[field] = field === 'port' ? parseInt(val) || 3001 : val;
-    snapshot = snapshot; onChange();
-  }
   function setProvider(oldName: string, newName: string, base: string, key: string) {
     const providers = c.providers;
     const entry = (providers as any)[oldName];
@@ -60,20 +56,8 @@
 
 <div class="page-head">
   <h1>连接</h1>
-  <p>本服务监听 + 多个上游 LLM 供应商。每个模型从哪个供应商拉来就自动走哪个供应商转发(没有 tag 的走默认)。</p>
-  <p class="muted">推理请求的认证头会原样透传；这里的 api_key 只用于“拉取上游模型”。</p>
-</div>
-
-<div class="card">
-  <h2 class="card-head-line">本服务</h2>
-  <div class="field">
-    <label class="field-label">host</label>
-    <input class="mono" value={c.server.host} on:change={(e) => server('host', v(e))} />
-  </div>
-  <div class="field">
-    <label class="field-label">port</label>
-    <input class="mono" type="number" value={c.server.port} on:change={(e) => server('port', v(e))} />
-  </div>
+  <p>多个上游 LLM 供应商。每个模型从哪个供应商拉来就自动走哪个供应商转发(没有 tag 的走默认)。</p>
+  <p class="muted">推理请求的认证头会原样透传；这里的 api_key 只用于“拉取上游模型”。本服务的 host/port 由启动命令决定(uvicorn --host --port)。</p>
 </div>
 
 <div class="card">

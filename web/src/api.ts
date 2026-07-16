@@ -85,7 +85,6 @@ export interface ProviderEntry {
   api_key: string;
 }
 export interface ConnectionCfg {
-  server: any;
   providers: { default: string } & Record<string, ProviderEntry>;
   admin: AdminCfg;
 }

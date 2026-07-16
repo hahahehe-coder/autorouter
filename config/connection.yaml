@@ -1,9 +1,7 @@
 # AutoRouter · 连接配置
 # 实际 API Key 和管理密码不要提交到公共仓库。
-
-server:
-  host: 0.0.0.0
-  port: 3001
+#
+# host/port 由启动命令(uvicorn)直接指定,不再写在这里。
 
 # 多上游供应商。default 是没有 upstream 标签时使用的回退供应商。
 # api_key 仅用于管理后台“拉取模型”；推理请求的认证头由调用方提供并原样透传。

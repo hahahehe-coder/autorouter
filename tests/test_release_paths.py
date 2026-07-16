@@ -202,6 +202,67 @@ class ProxyResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen[0].headers["x-api-key"], "caller-key")
         self.assertEqual(str(seen[0].url), "https://upstream.test/v1/embeddings")
 
+    async def test_x_original_auth_overrides_authorization_for_nested_newapi(self):
+        """嵌套 new-api 渠道:有 X-Original-Auth 时用它替换 Authorization 转发给上游。
+
+        new-api 渠道配 `X-Original-Auth: {client_header:Authorization}`,把原用户
+        token 透传给 AutoRouter;AutoRouter 转发到上游(通常又是 new-api)时用这个值
+        作 Authorization,让上游能正确按用户归属计费。
+        """
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, stream=_OneChunkStream(b'{"ok":true}'),
+                                  headers={"content-type": "application/json"})
+
+        transport = httpx.MockTransport(handler)
+
+        def upstream_client(*args, **kwargs):
+            kwargs["transport"] = transport
+            return self.real_async_client(*args, **kwargs)
+
+        app_transport = httpx.ASGITransport(app=channel.app)
+        async with self.real_async_client(transport=app_transport, base_url="http://autorouter") as client:
+            with patch.object(channel.httpx, "AsyncClient", side_effect=upstream_client):
+                await client.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "Authorization": "Bearer channel-key",
+                        "X-Original-Auth": "Bearer alice-user-token",
+                    },
+                    json={"model": "not-a-strategy", "messages": [{"role": "user", "content": "hi"}]},
+                )
+        # 上游收到的应该是用户真 token,不是 channel-key
+        self.assertEqual(seen[0].headers["authorization"], "Bearer alice-user-token")
+        # X-Original-Auth 自身不再透传(已消费)
+        self.assertNotIn("x-original-auth", seen[0].headers)
+
+    async def test_no_x_original_auth_keeps_passthrough_behavior(self):
+        """没有 X-Original-Auth 时保持原样透传 Authorization(直接客户端场景不变)。"""
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, stream=_OneChunkStream(b'{"ok":true}'),
+                                  headers={"content-type": "application/json"})
+
+        transport = httpx.MockTransport(handler)
+
+        def upstream_client(*args, **kwargs):
+            kwargs["transport"] = transport
+            return self.real_async_client(*args, **kwargs)
+
+        app_transport = httpx.ASGITransport(app=channel.app)
+        async with self.real_async_client(transport=app_transport, base_url="http://autorouter") as client:
+            with patch.object(channel.httpx, "AsyncClient", side_effect=upstream_client):
+                await client.post(
+                    "/v1/chat/completions",
+                    headers={"Authorization": "Bearer direct-client-key"},
+                    json={"model": "not-a-strategy", "messages": [{"role": "user", "content": "hi"}]},
+                )
+        self.assertEqual(seen[0].headers["authorization"], "Bearer direct-client-key")
+
 
 class ConfigApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_bulk_save_preserves_password_and_validates_before_write(self):

@@ -115,10 +115,6 @@ The recommended approach is to add providers from the **Connections** page in th
 You can also edit `config/connection.yaml` directly:
 
 ```yaml
-server:
-  host: 127.0.0.1
-  port: 3001
-
 providers:
   default: opencode
   opencode:

@@ -115,10 +115,6 @@ uv run uvicorn app.channel:app --host 127.0.0.1 --port 3001
 也可以直接编辑 `config/connection.yaml`：
 
 ```yaml
-server:
-  host: 127.0.0.1
-  port: 3001
-
 providers:
   default: opencode
   opencode:
