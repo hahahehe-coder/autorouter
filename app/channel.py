@@ -451,11 +451,18 @@ def _apply_field(endpoint: str, canonical: str, value, body: dict) -> None:
     elif canonical == "thinking":
         if value == "off":   # 不思考:按端点写关闭值,并清掉残留的开启态字段
             if endpoint == EP_CHAT:
-                body.pop("reasoning_effort", None)
-                body["reasoning"] = {"exclude": True}
+                # Chat Completions 官方写法:顶层 reasoning_effort="none"。
+                # (nested reasoning={effort:none} 是 Responses API 格式,
+                #  OpenAI Chat Completions 不认,会忽略)
+                body.pop("reasoning", None)
+                body["reasoning_effort"] = "none"
             elif endpoint == EP_RESPONSES:
                 body["reasoning"] = {"effort": "none"}
             elif endpoint == EP_MESSAGES:
+                # Anthropic 旧模型(≤ Opus 4.6)支持 type=disabled 硬关;
+                # Claude 5/Opus 4.7+ 是 adaptive 模式,只能调 effort 降级,
+                # 真要"off"只能等上游支持。这里走硬关,新模型会被上游忽略
+                # type 字段、按自身策略走。
                 body.pop("output_config", None)
                 body["thinking"] = {"type": "disabled"}
         elif endpoint == EP_CHAT:

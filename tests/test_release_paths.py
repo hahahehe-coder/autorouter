@@ -91,6 +91,30 @@ class RoutingInputTests(unittest.TestCase):
         self.assertEqual(decision.source, "heuristic")
         self.assertEqual(decision.rule_idx, 1)
 
+    def test_apply_field_thinking_off_chat_sets_reasoning_effort_none(self):
+        """OpenAI Chat Completions 格式:thinking=off → 顶层 reasoning_effort="none"。
+
+        注意不是 reasoning={effort:"none"}(那个是 Responses API 写法)。
+        OpenAI Chat Completions 官方把 reasoning_effort 作为顶层标量字段,
+        值允许 "low" / "medium" / "high" / "none"。
+        """
+        body: dict = {"model": "MiniMax-M3", "reasoning": {"effort": "high"}}
+        channel._apply_field(channel.EP_CHAT, "thinking", "off", body)
+        self.assertEqual(body["reasoning_effort"], "none")
+        self.assertNotIn("reasoning", body)
+
+    def test_apply_field_thinking_off_messages_sets_type_disabled(self):
+        """Anthropic messages 格式:thinking=off → thinking.type=disabled。"""
+        body: dict = {"model": "claude-opus-4-7", "thinking": {"type": "enabled", "budget_tokens": 4096}}
+        channel._apply_field(channel.EP_MESSAGES, "thinking", "off", body)
+        self.assertEqual(body["thinking"], {"type": "disabled"})
+
+    def test_apply_field_thinking_off_responses_sets_effort_none(self):
+        """OpenAI responses 格式:thinking=off → reasoning.effort=none。"""
+        body: dict = {"model": "MiniMax-M3"}
+        channel._apply_field(channel.EP_RESPONSES, "thinking", "off", body)
+        self.assertEqual(body["reasoning"], {"effort": "none"})
+
 
 class ProxyResponseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
