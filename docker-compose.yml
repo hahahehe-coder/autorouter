@@ -1,0 +1,27 @@
+services:
+  autorouter:
+    build: .
+    image: autorouter:latest
+    container_name: autorouter
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      # config 挂载到宿主机,改 connection.yaml 不需要重建镜像
+      - ./config:/app/config
+      # 日志持久化(可选)
+      - autorouter-logs:/app/log
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:3001/health', timeout=2).status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  autorouter-logs:
