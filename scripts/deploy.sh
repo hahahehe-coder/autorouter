@@ -2,22 +2,28 @@
 # scripts/deploy.sh — 一键打包并远程部署
 #
 # 用法:
-#   ./scripts/deploy.sh                          # 用默认服务器配置
-#   ./scripts/deploy.sh user@host 2222 /opt/autorouter
+#   ./scripts/deploy.sh user@host [port] [remote_dir]
+#
+# 环境变量(可选,优先级低于命令行参数):
+#   DEPLOY_HOST, DEPLOY_PORT, DEPLOY_REMOTE_DIR
 #
 # 流程:本地打包 → scp → 远端解压(保留用户 config/) → docker compose up -d --build
-#
-# 服务器配置默认写在下方 DEPLOY_* 三行,直接改这里就行;
-# 命令行参数临时覆盖这三个值。
 #
 # 首次连新主机 StrictHostKeyChecking=accept-new 自动接受新 host,
 # 但会拒绝 host key 变化的服务器(防中间人)。
 
 set -euo pipefail
 
-DEPLOY_HOST="${1:-root@10.18.101.56}"
-DEPLOY_PORT="${2:-10022}"
-DEPLOY_REMOTE_DIR="${3:-/opt/autorouter}"
+DEPLOY_HOST="${1:-${DEPLOY_HOST:-}}"
+DEPLOY_PORT="${2:-${DEPLOY_PORT:-22}}"
+DEPLOY_REMOTE_DIR="${3:-${DEPLOY_REMOTE_DIR:-/opt/autorouter}}"
+
+if [[ -z "$DEPLOY_HOST" ]]; then
+    echo "ERROR: DEPLOY_HOST not set." >&2
+    echo "  ./scripts/deploy.sh user@host [port] [remote_dir]" >&2
+    echo "  或 export DEPLOY_HOST=user@host 后再跑" >&2
+    exit 1
+fi
 
 SSH_OPTS=(-o "StrictHostKeyChecking=accept-new" -o "UserKnownHostsFile=/dev/null" -p "$DEPLOY_PORT")
 
