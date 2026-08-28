@@ -93,6 +93,9 @@ class PolicyCfg:
     lc_t3_context_ratio: float = 0.8      # 或 material ≥ ratio*context_window → 顶档
     lc_context_window: int = 128000       # 假定的最大窗口(给 ratio 用)
     # confidence_gate 保留接口但暂无可调参数(等接 ML 后用)
+    # robust 容错:模型请求失败(网络错误/403/429/5xx)后进入冷却的秒数,0=不冷却。
+    # 全局设置,内存态,重启清零。
+    failover_cooldown_seconds: int = 600
 
 
 # ============================================================
@@ -121,6 +124,8 @@ class StrategyCfg:
     rule: RuleCfg | None = None
     # rule / classifier: rule 数组
     rules: list[RuleCfg] = field(default_factory=list)
+    # robust: 有序容错链(首选 + 失败切换的后备模型)
+    models: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -206,9 +211,11 @@ def validate(cfg: Config) -> None:
             raise ValueError(
                 f"model '{model_name}': upstream provider '{model.upstream}' is not configured"
             )
+    if cfg.policy.failover_cooldown_seconds < 0:
+        raise ValueError("policy.failover.cooldown_seconds must be >= 0 (0 = no cooldown)")
     for n, s in cfg.strategies.items.items():
-        if s.kind not in ("single", "rule", "classifier"):
-            raise ValueError(f"strategy '{n}': kind must be single/rule/classifier, got '{s.kind}'")
+        if s.kind not in ("single", "rule", "classifier", "robust"):
+            raise ValueError(f"strategy '{n}': kind must be single/rule/classifier/robust, got '{s.kind}'")
         if s.kind == "single":
             if s.rule is None or not s.rule.model:
                 raise ValueError(f"strategy '{n}': single requires rule.model")
@@ -217,6 +224,17 @@ def validate(cfg: Config) -> None:
                     f"strategy '{n}': rule.model '{s.rule.model}' not in models registry "
                     f"(去「模型」tab 注册)"
                 )
+        elif s.kind == "robust":
+            if not s.models:
+                raise ValueError(f"strategy '{n}': robust requires non-empty models list")
+            for i, m in enumerate(s.models):
+                if not m:
+                    raise ValueError(f"strategy '{n}': models[{i}] must not be empty")
+                if m not in reg:
+                    raise ValueError(
+                        f"strategy '{n}': models[{i}] '{m}' not in models registry "
+                        f"(去「模型」tab 注册)"
+                    )
         else:  # rule / classifier
             if not s.rules:
                 raise ValueError(f"strategy '{n}': {s.kind} requires non-empty rules array")
@@ -297,6 +315,7 @@ def _parse_policy(d: dict | None) -> PolicyCfg:
     co = d.get("chitchat_only") or {}
     cg = d.get("capability_gate") or {}
     lc = d.get("large_context_floor") or {}
+    fo = d.get("failover") or {}
     return PolicyCfg(
         anti_downgrade_enabled=bool(ad.get("enabled", True)),
         anti_downgrade_window_seconds=int(ad.get("window_seconds", 600)),
@@ -309,6 +328,7 @@ def _parse_policy(d: dict | None) -> PolicyCfg:
         lc_t2_floor_tokens=int(lc.get("t2_floor_tokens", 50000)),
         lc_t3_context_ratio=float(lc.get("t3_context_ratio", 0.8)),
         lc_context_window=int(lc.get("context_window", 128000)),
+        failover_cooldown_seconds=int(fo.get("cooldown_seconds", 600)),
     )
 
 
@@ -326,6 +346,11 @@ def _parse_strategies(d: dict | None) -> StrategiesCfg:
             items[name] = StrategyCfg(
                 name=name, kind="single",
                 rule=_parse_rule(sd.get("rule")),
+            )
+        elif kind == "robust":
+            items[name] = StrategyCfg(
+                name=name, kind="robust",
+                models=[str(m) for m in (sd.get("models") or [])],
             )
         else:  # rule / classifier
             raw_rules = sd.get("rules") or []

@@ -15,6 +15,8 @@ import logging
 import logging.handlers as logging_handlers
 import os
 import re
+import signal
+import time
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
@@ -188,12 +190,45 @@ def reload_config() -> None:
     _CFG = config_mod.load_all(_config_dir())
     _setup_file_logging(_CFG.observability.log_dir)
     _OBSERVER = Observer()
-    logger.info(f"Reloaded. {len(_CFG.strategies.items)} strategies")
+    logger.info(f"Reloaded. {len(_CFG.strategies.items)} strategies (pid={os.getpid()})")
     # ML 重配 —— 失败不能拖垮代理(ML 挂了会自动降级启发式)
     try:
         ml_router.configure(_CFG.ml)
     except Exception as e:
         logger.warning(f"ML reconfigure failed (will degrade to heuristic): {e}")
+
+
+# SIGHUP 处理器 — 让所有 worker 一起 reload(--workers N>1 时,reload_config
+# 只能更新当前进程 _CFG;通过 SIGHUP 广播让其它 worker 也重新加载)。
+def _on_sighup_reload(signum, frame):
+    logger.info(f"SIGHUP received (pid={os.getpid()}), reloading...")
+    try:
+        reload_config()
+    except Exception as e:
+        logger.warning(f"SIGHUP reload failed: {e}")
+
+# Windows 上 signal 模块没有 SIGHUP 属性;非主线程 / 某些平台也不支持 signal.signal
+# —— 任何一种都跳过,单进程模式下 reload_config() 自身已经够了。
+if hasattr(signal, "SIGHUP"):
+    try:
+        signal.signal(signal.SIGHUP, _on_sighup_reload)
+    except (ValueError, OSError):
+        pass
+
+
+def _broadcast_sighup_to_workers() -> None:
+    """PUT 保存后向整个进程组广播 SIGHUP,所有 worker 都触发 reload_config()。
+
+    uvicorn --workers N 以 multiprocessing.spawn fork 出 N 个 worker,默认共享 PGID,
+    对 os.getpgrp() 广播 SIGHUP 即可一次唤醒所有 worker(master 收到也无副作用)。
+    Windows 上 SIGHUP 不支持,fallback 到 fork 后的子进程只有 1 个,功能上等价。
+    """
+    if not hasattr(signal, "SIGHUP"):
+        return
+    try:
+        os.killpg(os.getpgrp(), signal.SIGHUP)
+    except (ProcessLookupError, PermissionError, OSError) as e:
+        logger.debug(f"broadcast SIGHUP failed (ok if single worker): {e}")
 
 
 # 模块级常量来自 _CFG(每次请求用最新的)
@@ -510,6 +545,98 @@ async def _forward_stream(
     )
 
 
+def _should_failover(status_code: int) -> bool:
+    """403 / 429 / 5xx 视为可切换失败;其余状态(401/400/…)原样透传不重试。"""
+    return status_code in (403, 429) or 500 <= status_code <= 599
+
+
+# robust 容错:失败模型的冷却表(模型名 → monotonic 截止时间)。内存态,重启清零。
+_MODEL_COOLDOWN: dict[str, float] = {}
+
+
+def _model_in_cooldown(model: str) -> bool:
+    until = _MODEL_COOLDOWN.get(model)
+    if until is None:
+        return False
+    if until <= time.monotonic():
+        del _MODEL_COOLDOWN[model]   # 过期即清理
+        return False
+    return True
+
+
+def _mark_model_cooldown(model: str, seconds: int) -> None:
+    """失败模型进入冷却;与已有截止时间取更晚者(冷却期内再失败不缩短冷却)。"""
+    if seconds <= 0:
+        return
+    until = time.monotonic() + seconds
+    if until > _MODEL_COOLDOWN.get(model, 0.0):
+        _MODEL_COOLDOWN[model] = until
+
+
+async def _forward_failover(
+    chain: list[str], endpoint: str, upstream_path: str,
+    body: dict, headers: dict, extra_base: dict,
+) -> Response:
+    """robust 策略:按顺序尝试 chain 中模型,失败(网络错误/403/429/5xx)切换下一个。
+
+    冷却中的模型被跳过(policy.failover.cooldown_seconds,全局);全部都在冷却时
+    忽略冷却按原序照常尝试(总比直接报错好)。失败模型标记进入冷却。
+    流式:send(stream=True) 在响应头到达后、body 字节流出前返回,先看状态码再决定
+    是否切换;一旦提交(返回 StreamingResponse)不再切换。非流式:读完 body 再判断。
+    全部失败:最后一次尝试的响应原样返回;最后一次是网络错误则 502。
+    """
+    stream = bool(body.get("stream"))
+    cooldown = _CFG.policy.failover_cooldown_seconds
+    candidates = [m for m in chain if not _model_in_cooldown(m)]
+    ordered = candidates if candidates else list(chain)
+    client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+    last_error = ""
+    for i, model in enumerate(ordered):
+        is_last = i == len(ordered) - 1
+        _apply_field(endpoint, "model", model, body)          # 每次 attempt 重写 body.model
+        extra = {**extra_base, "X-Auto-Routed-To": model}     # 响应头反映实际模型
+        try:
+            url = _upstream_url(_model_upstream(model), upstream_path)
+        except ValueError as e:
+            logger.warning(f"robust: model '{model}' upstream error: {e}")
+            last_error = str(e)
+            continue
+        try:
+            request = client.build_request("POST", url, json=body, headers=headers)
+            upstream = await client.send(request, stream=True)
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning(f"robust: model '{model}' unreachable: {e}")
+            last_error = f"upstream unreachable: {e}"
+            _mark_model_cooldown(model, cooldown)
+            continue
+        if not is_last and _should_failover(upstream.status_code):
+            logger.info(f"robust: model '{model}' -> {upstream.status_code}, trying next")
+            await upstream.aclose()
+            _mark_model_cooldown(model, cooldown)
+            continue
+        if _should_failover(upstream.status_code):
+            _mark_model_cooldown(model, cooldown)   # 最后一搏也失败 → 同样进冷却
+        # 提交本次响应:成功 / 非切换类状态 / 或已是最后一搏(原样给客户端)
+        if stream:
+            return StreamingResponse(
+                upstream.aiter_raw(),
+                status_code=upstream.status_code,
+                headers=_response_headers(upstream.headers, extra),
+                background=BackgroundTask(_close_stream, upstream, client),
+            )
+        content = b"".join([chunk async for chunk in upstream.aiter_raw()])
+        await upstream.aclose()
+        await client.aclose()
+        return Response(
+            content=content,
+            status_code=upstream.status_code,
+            headers=_response_headers(upstream.headers, extra),
+        )
+    await client.aclose()
+    return JSONResponse({"error": last_error or "upstream unreachable: all robust models failed"},
+                        status_code=502)
+
+
 # ============================ 公共路由 ============================
 
 @app.get("/health")
@@ -578,6 +705,11 @@ async def _route_and_forward(endpoint: str, request: Request):
         "X-Strategy":       decision.strategy,
         "X-Source":         decision.source,
     }
+
+    # robust 策略:带后备链,失败(网络错误/429/5xx)自动切换下一个模型
+    chain = [decision.model] + decision.fallback_models
+    if len(chain) > 1:
+        return await _forward_failover(chain, endpoint, upstream_path, body, headers, extra)
 
     if body.get("stream"):
         try:
@@ -693,6 +825,7 @@ async def put_config_all(request: Request):
         config_mod.validate_updates(updates, _config_dir())
         config_mod.save_sections(updates, _config_dir())
         reload_config()
+        _broadcast_sighup_to_workers()
     except ValueError as e:
         return JSONResponse({"error": f"validation failed: {e}"}, 400)
     except Exception as e:
@@ -720,6 +853,7 @@ async def put_config_section(section: str, request: Request):
         config_mod.validate_updates({section: new_data}, _config_dir())
         config_mod.save_section(section, new_data, _config_dir())
         reload_config()    # 全量重载 + 跨文件校验
+        _broadcast_sighup_to_workers()
     except ValueError as e:
         return JSONResponse({"error": f"validation failed: {e}"}, 400)
     except Exception as e:
@@ -875,11 +1009,16 @@ def _serialize(cfg: config_mod.Config) -> dict:
                 "t3_context_ratio": cfg.policy.lc_t3_context_ratio,
                 "context_window": cfg.policy.lc_context_window,
             },
+            "failover": {
+                "cooldown_seconds": cfg.policy.failover_cooldown_seconds,
+            },
         },
         "strategies": {
             n: (
                 {"kind": "single", "rule": rule_to_dict(s.rule)}
                 if s.kind == "single"
+                else {"kind": "robust", "models": list(s.models)}
+                if s.kind == "robust"
                 else {"kind": s.kind, "rules": [rule_to_dict(r) for r in s.rules]}
             )
             for n, s in cfg.strategies.items.items()

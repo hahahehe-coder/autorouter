@@ -36,6 +36,8 @@ class RoutingDecision:
     # 这个档位要覆盖到请求 body 的字段集合(model 必含,其它可选)
     fields: dict[str, Any] = field(default_factory=dict)
     policies: list[PolicyStep] = field(default_factory=list)
+    # robust: 首选失败(网络错误/429/5xx)时按序切换的后备模型链
+    fallback_models: list[str] = field(default_factory=list)
 
 
 # ============================ helpers ============================
@@ -80,6 +82,23 @@ def _route_static(strategy: StrategyCfg) -> RoutingDecision:
         confidence=1.0,
         source="static",
         fields=_rule_fields(rule),
+    )
+
+
+def _route_robust(strategy: StrategyCfg) -> RoutingDecision:
+    """robust:首选 models[0],其余为失败切换链(转发层负责切换)。"""
+    if not strategy.models:
+        raise ValueError(f"strategy '{strategy.name}': robust requires non-empty models")
+    primary = strategy.models[0]
+    return RoutingDecision(
+        strategy=strategy.name,
+        rule_idx=0,
+        rule_count=len(strategy.models),
+        model=primary,
+        confidence=1.0,
+        source="robust",
+        fields={"model": primary},
+        fallback_models=strategy.models[1:],
     )
 
 
@@ -175,4 +194,6 @@ def route(strategy_name: str, body: dict, cfg: Config, *,
     if kind in ("rule", "classifier"):
         return _route_bands(strat, body, messages, cfg, session_key,
                             prev_idx=prev_idx, use_ml=(kind == "classifier"))
+    if kind == "robust":
+        return _route_robust(strat)
     raise ValueError(f"unknown strategy.kind '{kind}' for '{strategy_name}'")

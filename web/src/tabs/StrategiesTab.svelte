@@ -56,20 +56,29 @@
     delete snapshot.strategies[name];
     snapshot = snapshot; onChange();
   }
-  function changeKind(name: string, kind: 'single' | 'rule' | 'classifier') {
+  function changeKind(name: string, kind: 'single' | 'rule' | 'classifier' | 'robust') {
     const s = snapshot.strategies[name];
     s.kind = kind;                                   // 必须写,模板靠它切分支
     if (kind === 'single') {
       if (!s.rule || !s.rule.model) s.rule = { model: defaultModel };
       delete s.rules;
+      delete s.models;
+    } else if (kind === 'robust') {
+      // 从现有 rules/rule 提取模型名(去重保序)初始化容错链
+      const from = s.rules?.map(r => r.model).filter(Boolean)
+        ?? (s.rule?.model ? [s.rule.model] : []);
+      s.models = [...new Set(from)].length > 0 ? [...new Set(from)] : [defaultModel];
+      delete s.rule;
+      delete s.rules;
     } else {
       s.rules = (s.rules && s.rules.length >= 2) ? s.rules : [{ model: defaultModel }, { model: defaultModel }];
       delete s.rule;
+      delete s.models;
     }
     snapshot = snapshot; onChange();
   }
   function onKindSelect(name: string) {
-    return (e: Event) => changeKind(name, selVal(e) as 'single' | 'rule' | 'classifier');
+    return (e: Event) => changeKind(name, selVal(e) as 'single' | 'rule' | 'classifier' | 'robust');
   }
 
   // --- static rule ---
@@ -143,6 +152,31 @@
     return (snapshot.strategies[name].rules?.length ?? 1) - 1;
   }
 
+  // --- robust models(有序容错链) ---
+  function onRobustModelInput(name: string, idx: number, e: Event) {
+    snapshot.strategies[name].models![idx] = (e as CustomEvent).detail;
+    snapshot = snapshot; onChange();
+  }
+  function addRobustModel(name: string) {
+    if (registryEmpty) return;
+    snapshot.strategies[name].models!.push(defaultModel);
+    snapshot = snapshot; onChange();
+  }
+  function removeRobustModel(name: string, idx: number) {
+    snapshot.strategies[name].models!.splice(idx, 1);
+    snapshot = snapshot; onChange();
+  }
+  function moveRobustModel(name: string, idx: number, dir: -1 | 1) {
+    const arr = snapshot.strategies[name].models!;
+    const j = idx + dir;
+    if (j < 0 || j >= arr.length) return;
+    [arr[idx], arr[j]] = [arr[j], arr[idx]];
+    snapshot = snapshot; onChange();
+  }
+  function lastModelIdx(name: string): number {
+    return (snapshot.strategies[name].models?.length ?? 1) - 1;
+  }
+
   function blurOnEnter(e: KeyboardEvent) {
     if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
   }
@@ -191,6 +225,7 @@
               <option value="single"     selected={snapshot.strategies[n].kind === 'single'}>single — 单模型</option>
               <option value="rule"       selected={snapshot.strategies[n].kind === 'rule'}>rule — 基于规则(启发式 band)</option>
               <option value="classifier" selected={snapshot.strategies[n].kind === 'classifier'}>classifier — 基于分类器(ML;不可用回退 rule)</option>
+              <option value="robust"     selected={snapshot.strategies[n].kind === 'robust'}>robust — 稳健模式(失败自动切换)</option>
             </select>
           </div>
           <div></div>
@@ -233,6 +268,28 @@
         <p class="muted" style="margin: 4px 0 0; font-size: 12px;">
           端点自动映射:chat → reasoning_effort / messages → thinking + output_config / responses → reasoning。
         </p>
+        {:else if snapshot.strategies[n].kind === 'robust'}
+          <p class="muted" style="margin: 0 0 8px;">
+            模型按顺序尝试:第一个失败(网络错误 / 403 / 429 / 5xx)自动切换下一个;失败的模型进入冷却期(时长在「后处理」页全局设置),冷却期内跳过。全部失败返回最后一次的错误;流式请求在开始输出后不再切换。
+          </p>
+          {#each snapshot.strategies[n].models ?? [] as m, i (i)}
+            <div class="rule-card">
+              <div class="rule-card-head">
+                <span class="rule-num">模型 {i + 1}{#if i === 0}(主){/if}</span>
+                <div class="rule-card-actions">
+                  {#if i > 0}<button class="btn-ghost btn-sm" on:click={() => moveRobustModel(n, i, -1)}>上移</button>{/if}
+                  {#if i < lastModelIdx(n)}<button class="btn-ghost btn-sm" on:click={() => moveRobustModel(n, i, 1)}>下移</button>{/if}
+                  <button class="btn-danger btn-sm" on:click={() => removeRobustModel(n, i)}>删除</button>
+                </div>
+              </div>
+
+              <div class="field">
+                <label class="field-label">模型</label>
+                <ModelSelect value={m ?? ''} {models} on:change={(e) => onRobustModelInput(n, i, e)} />
+              </div>
+            </div>
+          {/each}
+          <button class="btn-ghost" on:click={() => addRobustModel(n)} style="font-size: 13px; margin-top: 8px;">+ 添加容错模型</button>
         {:else}
           <p class="muted" style="margin: 0 0 8px;">
             数组下标 = classifier 输出(0 trivial / 1 medium / 2 code / 3 heavy)。越往后能力越强。

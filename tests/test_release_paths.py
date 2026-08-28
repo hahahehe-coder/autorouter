@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import json
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,7 +13,7 @@ import httpx
 
 from app import channel
 from app import config as config_mod
-from app.config import ModelCfg, ProvidersCfg, UpstreamCfg
+from app.config import ModelCfg, ProvidersCfg, StrategyCfg, StrategiesCfg, UpstreamCfg
 from app.router import route
 from app.session import compute_session_key
 
@@ -288,6 +290,249 @@ class ProxyResponseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen[0].headers["authorization"], "Bearer direct-client-key")
 
 
+class RobustFailoverTests(unittest.IsolatedAsyncioTestCase):
+    """robust 策略:失败(网络错误/429/5xx)按序切换下一个模型,其余状态原样透传。"""
+
+    PRIMARY = "MiniMax-M3"   # 两个名字都在现有 models.yaml 注册表 fixture 中
+    BACKUP = "glm-5.2"
+
+    async def asyncSetUp(self):
+        self.real_async_client = httpx.AsyncClient
+        self.old_providers = channel._CFG.connection.providers
+        self.old_models = channel._CFG.models.items
+        self.old_strategies = channel._CFG.strategies
+        self.old_policy = channel._CFG.policy
+        channel._CFG.connection.providers = ProvidersCfg(
+            default="default",
+            items={
+                "default": UpstreamCfg(name="default", base_url="https://default.test", api_key=""),
+                "mock": UpstreamCfg(name="mock", base_url="https://upstream.test/v1", api_key=""),
+            },
+        )
+        channel._CFG.strategies = StrategiesCfg(items={
+            "stable": StrategyCfg(
+                name="stable", kind="robust",
+                models=[self.PRIMARY, self.BACKUP],
+            ),
+        })
+        channel._MODEL_COOLDOWN.clear()
+
+    async def asyncTearDown(self):
+        channel._CFG.connection.providers = self.old_providers
+        channel._CFG.models.items = self.old_models
+        channel._CFG.strategies = self.old_strategies
+        channel._CFG.policy = self.old_policy
+        channel._MODEL_COOLDOWN.clear()
+
+    async def _request(self, handler, *, stream: bool) -> tuple[httpx.Response, list[httpx.Request]]:
+        """走 /v1/chat/completions,model=robust 策略名;handler 按请求体 model 分流。"""
+        seen: list[httpx.Request] = []
+
+        def wrapped(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return handler(request)
+
+        transport = httpx.MockTransport(wrapped)
+
+        def upstream_client(*args, **kwargs):
+            kwargs["transport"] = transport
+            return self.real_async_client(*args, **kwargs)
+
+        app_transport = httpx.ASGITransport(app=channel.app)
+        async with self.real_async_client(transport=app_transport, base_url="http://autorouter") as client:
+            with patch.object(channel.httpx, "AsyncClient", side_effect=upstream_client):
+                response = await client.post(
+                    "/v1/chat/completions",
+                    headers={"Authorization": "Bearer caller"},
+                    json={
+                        "model": "stable",
+                        "stream": stream,
+                        "messages": [{"role": "user", "content": "hello"}],
+                    },
+                )
+        return response, seen
+
+    def _status_by_model(self, primary_status: int, backup_status: int, backup_body: bytes):
+        """handler 工厂:按请求体里的 model 名返回对应状态。"""
+        def handler(request: httpx.Request) -> httpx.Response:
+            model = json.loads(request.content)["model"]
+            if model == self.PRIMARY:
+                return httpx.Response(
+                    primary_status, stream=_OneChunkStream(b'{"error":"primary-failed"}'),
+                    headers={"content-type": "application/json", "x-upstream": "primary"},
+                )
+            return httpx.Response(
+                backup_status, stream=_OneChunkStream(backup_body),
+                headers={"content-type": "application/json", "x-upstream": "backup"},
+            )
+        return handler
+
+    async def test_buffered_500_then_200_switches_to_next_model(self):
+        response, seen = await self._request(
+            self._status_by_model(500, 200, b'{"ok":"backup"}'), stream=False)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b'{"ok":"backup"}')
+        self.assertEqual(len(seen), 2)
+        # 两次上游调用各自携带正确的模型名
+        self.assertEqual(json.loads(seen[0].content)["model"], self.PRIMARY)
+        self.assertEqual(json.loads(seen[1].content)["model"], self.BACKUP)
+        # 响应头反映实际服务模型
+        self.assertEqual(response.headers["x-auto-routed-to"], self.BACKUP)
+
+    async def test_stream_500_then_200_switches_before_first_byte(self):
+        """流式:500 的响应头到达但字节未流出 → 可安全切换。"""
+        response, seen = await self._request(
+            self._status_by_model(500, 200, b'data: {"ok":"backup"}\n\n'), stream=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b'data: {"ok":"backup"}\n\n')
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(response.headers["x-auto-routed-to"], self.BACKUP)
+
+    async def test_429_triggers_failover(self):
+        response, seen = await self._request(
+            self._status_by_model(429, 200, b'{"ok":"backup"}'), stream=False)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(seen), 2)
+
+    async def test_403_triggers_failover(self):
+        response, seen = await self._request(
+            self._status_by_model(403, 200, b'{"ok":"backup"}'), stream=False)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(seen), 2)
+
+    async def test_failed_model_enters_cooldown_and_is_skipped(self):
+        handler = self._status_by_model(500, 200, b'{"ok":"backup"}')
+        first, seen1 = await self._request(handler, stream=False)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(len(seen1), 2)
+        self.assertTrue(channel._model_in_cooldown(self.PRIMARY))
+        # 第二次请求:冷却中的 PRIMARY 被跳过,直接打 BACKUP
+        second, seen2 = await self._request(handler, stream=False)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(len(seen2), 1)
+        self.assertEqual(json.loads(seen2[0].content)["model"], self.BACKUP)
+
+    async def test_cooldown_expiry_retries_model(self):
+        handler = self._status_by_model(500, 200, b'{"ok":"backup"}')
+        await self._request(handler, stream=False)
+        # 手动让 PRIMARY 的冷却过期
+        channel._MODEL_COOLDOWN[self.PRIMARY] = time.monotonic() - 1
+        self.assertFalse(channel._model_in_cooldown(self.PRIMARY))
+        _, seen2 = await self._request(handler, stream=False)
+        self.assertEqual(len(seen2), 2)
+        self.assertEqual(json.loads(seen2[0].content)["model"], self.PRIMARY)
+
+    async def test_all_models_in_cooldown_still_tried_in_order(self):
+        handler = self._status_by_model(500, 503, b'{"error":"backup-failed"}')
+        first, seen1 = await self._request(handler, stream=False)
+        self.assertEqual(first.status_code, 503)
+        self.assertTrue(channel._model_in_cooldown(self.PRIMARY))
+        self.assertTrue(channel._model_in_cooldown(self.BACKUP))
+        # 全冷却:忽略冷却按原序照常尝试,不直接报错
+        second, seen2 = await self._request(handler, stream=False)
+        self.assertEqual(second.status_code, 503)
+        self.assertEqual(len(seen2), 2)
+        self.assertEqual(json.loads(seen2[0].content)["model"], self.PRIMARY)
+
+    async def test_non_failover_status_does_not_mark_cooldown(self):
+        handler = self._status_by_model(401, 200, b'{"ok":"backup"}')
+        first, seen1 = await self._request(handler, stream=False)
+        self.assertEqual(first.status_code, 401)
+        self.assertEqual(len(seen1), 1)
+        self.assertFalse(channel._model_in_cooldown(self.PRIMARY))
+        # 401 不冷却 → 下次请求仍先打 PRIMARY
+        _, seen2 = await self._request(handler, stream=False)
+        self.assertEqual(len(seen2), 1)
+        self.assertEqual(json.loads(seen2[0].content)["model"], self.PRIMARY)
+
+    async def test_cooldown_zero_disables_marking(self):
+        old = channel._CFG.policy
+        try:
+            channel._CFG.policy = config_mod.PolicyCfg(failover_cooldown_seconds=0)
+            handler = self._status_by_model(500, 200, b'{"ok":"backup"}')
+            await self._request(handler, stream=False)
+            self.assertFalse(channel._model_in_cooldown(self.PRIMARY))
+        finally:
+            channel._CFG.policy = old
+
+    def test_policy_failover_parse_and_validate(self):
+        self.assertEqual(config_mod._parse_policy({}).failover_cooldown_seconds, 600)
+        parsed = config_mod._parse_policy({"failover": {"cooldown_seconds": 30}})
+        self.assertEqual(parsed.failover_cooldown_seconds, 30)
+        old = channel._CFG.policy
+        try:
+            channel._CFG.policy = config_mod.PolicyCfg(failover_cooldown_seconds=-1)
+            with self.assertRaises(ValueError):
+                config_mod.validate(channel._CFG)
+        finally:
+            channel._CFG.policy = old
+
+    async def test_401_does_not_trigger_failover(self):
+        response, seen = await self._request(
+            self._status_by_model(401, 200, b'{"ok":"backup"}'), stream=False)
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.content, b'{"error":"primary-failed"}')
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(response.headers["x-auto-routed-to"], self.PRIMARY)
+
+    async def test_all_models_fail_returns_last_response_verbatim(self):
+        """最后一搏(503 也属切换类)不再切换,原样返回。"""
+        response, seen = await self._request(
+            self._status_by_model(500, 503, b'{"error":"backup-failed"}'), stream=False)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.content, b'{"error":"backup-failed"}')
+        self.assertEqual(response.headers["x-upstream"], "backup")
+        self.assertEqual(len(seen), 2)
+
+    async def test_all_transport_errors_return_502(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+        response, seen = await self._request(handler, stream=False)
+        self.assertEqual(response.status_code, 502)
+        self.assertIn(b"unreachable", response.content)
+        self.assertEqual(len(seen), 2)
+
+    # --- 配置解析 / 校验(同步用例) ---
+
+    def test_config_rejects_robust_with_empty_models(self):
+        old = channel._CFG.strategies
+        try:
+            channel._CFG.strategies = StrategiesCfg(items={
+                "stable": StrategyCfg(name="stable", kind="robust", models=[]),
+            })
+            with self.assertRaises(ValueError):
+                config_mod.validate(channel._CFG)
+        finally:
+            channel._CFG.strategies = old
+
+    def test_config_rejects_robust_with_unknown_model(self):
+        old = channel._CFG.strategies
+        try:
+            channel._CFG.strategies = StrategiesCfg(items={
+                "stable": StrategyCfg(name="stable", kind="robust", models=["no-such-model"]),
+            })
+            with self.assertRaises(ValueError):
+                config_mod.validate(channel._CFG)
+        finally:
+            channel._CFG.strategies = old
+
+    def test_parse_and_serialize_roundtrip(self):
+        parsed = config_mod._parse_strategies(
+            {"stable": {"kind": "robust", "models": [self.PRIMARY, self.BACKUP]}})
+        self.assertEqual(parsed.items["stable"].models, [self.PRIMARY, self.BACKUP])
+        old = channel._CFG.strategies
+        try:
+            channel._CFG.strategies = StrategiesCfg(items={
+                "stable": StrategyCfg(name="stable", kind="robust",
+                                      models=[self.PRIMARY, self.BACKUP]),
+            })
+            snapshot = channel._serialize(channel._CFG)
+        finally:
+            channel._CFG.strategies = old
+        self.assertEqual(snapshot["strategies"]["stable"],
+                         {"kind": "robust", "models": [self.PRIMARY, self.BACKUP]})
+
+
 class ConfigApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_bulk_save_preserves_password_and_validates_before_write(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -315,6 +560,26 @@ class ConfigApiTests(unittest.IsolatedAsyncioTestCase):
                     rejected = await client.put("/api/config", json=invalid)
                     self.assertEqual(rejected.status_code, 400, rejected.text)
                     self.assertEqual((config_dir / "models.yaml").read_bytes(), before_models)
+
+    async def test_put_broadcasts_sighup_so_other_workers_reload(self):
+        """--workers N>1 时,PUT 处理后必须广播 SIGHUP 让其它 worker 一起 reload_config()。
+
+        避免「UI 显示新配置 / 文件是新配置 / 但请求落到未更新的 worker 上」这种 stale 状态。
+        """
+        transport = httpx.ASGITransport(app=channel.app)
+        with patch.object(channel, "_broadcast_sighup_to_workers") as broadcast:
+            async with httpx.AsyncClient(transport=transport, base_url="http://autorouter") as client:
+                # 完整 PUT
+                payload = channel._serialize(channel._CFG)
+                r1 = await client.put("/api/config", json=payload)
+                self.assertEqual(r1.status_code, 200, r1.text)
+                broadcast.assert_called()
+                broadcast.reset_mock()
+                # 单 section PUT
+                strategies = config_mod.load_section("strategies", Path(channel._config_dir())) or {}
+                r2 = await client.put("/api/config/strategies", json=strategies)
+                self.assertEqual(r2.status_code, 200, r2.text)
+                broadcast.assert_called()
 
 
 if __name__ == "__main__":

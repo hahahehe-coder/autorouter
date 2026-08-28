@@ -51,13 +51,14 @@ client ──► /v1/chat/completions  ─┐
 
 ### Strategy kinds (`app/config.py`)
 
-Each strategy is one of three kinds (parsed aliases: `static`→`single`, `heuristic`→`classifier`):
+Each strategy is one of four kinds (parsed aliases: `static`→`single`, `heuristic`→`classifier`):
 
 | `kind` | Inputs | Source |
 |---|---|---|
 | `single` | `rule` (one) | `static` |
 | `rule` | `rules[]` (4-tier, idx 0=trivial…3=heavy) | `heuristic` |
 | `classifier` | `rules[]` (4-tier) | `ml` (falls back to `heuristic` if bundle missing/broken) |
+| `robust` | `models[]` (ordered failover chain) | always first available model; channel-level failover on network error / 403 / 429 / 5xx (`_forward_failover`), failed models enter a global in-memory cooldown (`policy.failover.cooldown_seconds`, default 600s) |
 
 Unknown strategy name in `body.model` → **passthrough** (no rewrites, original model sent upstream).
 

@@ -7,13 +7,10 @@ expert:
   rule:
     model: glm-5.2
 heuristic_test:
-  # 压测 / 调试用:kind=rule 纯 heuristic 路由,不带 ML 不带 confidence_gate。
-  # 测试时方便按 chars/code 分布精准预测每条 query 去哪档。
   kind: rule
   rules:
   - model: MiniMax-M3
     max_tokens: 4096
-    thinking: off
   - model: MiniMax-M3
   - model: kimi-for-coding
     thinking: medium

@@ -26,6 +26,11 @@
     (p.large_context_floor as any)[field] = val;
     snapshot = snapshot; onChange();
   }
+  function setFailoverCooldown(val: number) {
+    p.failover ??= { cooldown_seconds: 600 };
+    p.failover.cooldown_seconds = val;
+    snapshot = snapshot; onChange();
+  }
 </script>
 
 <div class="page-head">
@@ -126,6 +131,27 @@
         </div>
       </div>
     {/if}
+  </div>
+</div>
+
+<div class="card" style="margin-top: 16px;">
+  <h2 class="card-head-line">robust 容错(全局)</h2>
+
+  <div class="policy-item">
+    <div class="row-spread">
+      <div>
+        <strong>失败冷却</strong>
+        <p class="muted" style="margin: 2px 0 0;">
+          robust 策略里请求失败的模型(网络错误 / 403 / 429 / 5xx)进入冷却,期间直接跳过;
+          全部模型都在冷却时按原序照常尝试。0 = 不冷却。状态存内存,重启清零。
+        </p>
+      </div>
+    </div>
+    <div class="field" style="margin-top: 10px;">
+      <label class="field-label">cooldown_seconds(默认 600)</label>
+      <input type="number" min="0" value={p.failover?.cooldown_seconds ?? 600}
+        on:change={(e) => { const v = toInt(e); setFailoverCooldown(Number.isNaN(v) ? 600 : Math.max(0, v)); }} />
+    </div>
   </div>
 </div>
 

@@ -5,7 +5,8 @@ services:
     container_name: autorouter
     restart: unless-stopped
     ports:
-      - "3001:3001"
+      # 宿主机端口可用 .env 的 AUTOROUTER_PORT 覆盖(默认 3001),容器内固定 3001
+      - "${AUTOROUTER_PORT:-3001}:3001"
     volumes:
       # config 挂载到宿主机,改 connection.yaml 不需要重建镜像
       - ./config:/app/config

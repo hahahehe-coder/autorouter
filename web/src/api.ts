@@ -56,9 +56,10 @@ export interface RuleData {
   thinking?: string;        // effort 字符串(各端点映射见 channel._apply_field)
 }
 export interface StrategyData {
-  kind: 'static' | 'heuristic' | 'single' | 'rule' | 'classifier';
+  kind: 'static' | 'heuristic' | 'single' | 'rule' | 'classifier' | 'robust';
   rule?: RuleData;                 // single
   rules?: RuleData[];             // rule / classifier
+  models?: string[];              // robust: 有序容错链
 }
 export interface ModelEntry {
   supports_vision?: boolean | null;  // null=未知(capability_gate 不动)

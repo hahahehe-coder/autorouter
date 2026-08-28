@@ -70,7 +70,7 @@ Apart from fields explicitly overridden by the selected rule—such as `model`, 
 ## Core capabilities
 
 - **Intelligent model routing:** Uses the OpenSquilla v4.2 bundle (LightGBM + BGE/ONNX, 390 features) to estimate task difficulty
-- **Three routing modes:** `single` for a fixed model, `rule` for heuristic classification, and `classifier` for ML classification
+- **Four routing modes:** `single` for a fixed model, `rule` for heuristic classification, `classifier` for ML classification, and `robust` for availability-first failover across an ordered model list
 - **Multi-layer routing safeguards:** Confidence fallback, chitchat restriction, complaint upgrade, session anti-downgrade, capability checks, and large-context upgrades
 - **Multiple upstream providers:** Selects a provider from the routed model's `upstream` tag
 - **Multiple API endpoints:** Supports `/v1/chat/completions`, `/v1/messages`, and `/v1/responses`, with transparent forwarding for other `/v1/*` requests
@@ -230,6 +230,7 @@ uv run --no-sync python -m unittest discover -s tests -v
 | `single` | One rule and one fixed model; no classification |
 | `rule` | Deterministic heuristic bands based on length and code signals; index 0–3 maps to `rules[idx]` |
 | `classifier` | ML classifier produces index 0–3; automatically falls back to `rule` when ML is unavailable |
+| `robust` | Availability-first: an ordered model list; on failure (network error / 403 / 429 / 5xx) it automatically switches to the next model. Streaming requests only switch before the first byte is sent. Failed models enter a global cooldown (`policy.yaml` `failover.cooldown_seconds`, default 600s, 0 = disabled) and are skipped until it expires; if every model is cooling down they are still tried in order |
 
 ### Policy chain (six steps by default)
 
@@ -251,7 +252,7 @@ Each step can upgrade, downgrade, or preserve the selected tier. Every step can 
 | File | Purpose |
 |---|---|
 | `connection.yaml` | Server listener, multiple upstream providers (`default` plus name → `base_url`/`api_key`), and admin login |
-| `strategies.yaml` | Routing strategies using `single`, `rule`, or `classifier` |
+| `strategies.yaml` | Routing strategies using `single`, `rule`, `classifier`, or `robust` |
 | `policy.yaml` | Policy-chain switches and thresholds such as the anti-downgrade window and large-context floors |
 | `observability.yaml` | Contains only `log_dir`, which defaults to `./log` |
 | `models.yaml` | Model capability registry used by `capability_gate` |

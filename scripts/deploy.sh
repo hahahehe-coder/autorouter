@@ -59,19 +59,20 @@ REMOTE_DIR="$1"
 mkdir -p "$REMOTE_DIR"
 cd "$REMOTE_DIR"
 
-# 保留用户编辑过的 config/(connection.yaml 含真实渠道 key,
-# 避免被 tarball 里的空模板覆盖)
-if [ -f config/connection.yaml ]; then
-    cp config/connection.yaml /tmp/_connection.yaml.bak
+# 保留用户在 UI / config/*.yaml 里编辑过的所有内容(策略 / 模型表 / 渠道 key / 管理密码)——
+# tarball 里只有仓库默认模板,直接覆盖会把真实配置冲掉。
+if compgen -G "config/*.yaml" > /dev/null; then
+    mkdir -p /tmp/_autorouter_config_bak
+    cp config/*.yaml /tmp/_autorouter_config_bak/
 fi
 
 tar -xzf /tmp/autorouter.tgz
 rm -f /tmp/autorouter.tgz
 
-if [ -f /tmp/_connection.yaml.bak ]; then
-    cp /tmp/_connection.yaml.bak config/connection.yaml
-    rm -f /tmp/_connection.yaml.bak
-    echo "    config/connection.yaml restored"
+if [ -d /tmp/_autorouter_config_bak ]; then
+    cp /tmp/_autorouter_config_bak/*.yaml config/
+    rm -rf /tmp/_autorouter_config_bak
+    echo "    config/*.yaml restored from backup (策略 / 模型 / 渠道 key 等不覆盖)"
 fi
 
 echo "    docker compose up -d --build ..."

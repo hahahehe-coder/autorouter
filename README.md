@@ -187,6 +187,14 @@ auto:
 
 请求时将 `model` 填为策略名称 `auto`。AutoRouter 会先选择档位，再把它改写成对应的真实模型名称并转发到该模型绑定的供应商。
 
+如果更看重**可用性**而非模型能力,可以用 `robust` 模式:配置一个有序模型列表,请求先打第一个模型,失败(网络错误 / 403 / 429 / 5xx)自动切换下一个;全部失败则原样返回最后一次的上游响应。流式请求只在开始输出前切换。失败的模型会进入冷却期(全局 `policy.yaml` 的 `failover.cooldown_seconds`,默认 600 秒,0 = 不冷却),期间直接跳过、到期自动恢复;所有模型都在冷却时仍按原序尝试。冷却状态存内存,重启清零。
+
+```yaml
+stable:
+  kind: robust
+  models: [strong-model, code-model]   # strong-model 挂了自动切 code-model
+```
+
 ### 5. 发送第一个请求
 
 下面以 OpenAI 兼容的 Chat Completions 请求为例。使用 `-i` 可以同时查看 `X-Auto-Routed-To` 等路由结果响应头：
@@ -251,7 +259,7 @@ confidence_gate → chitchat_only → complaint → anti_downgrade
 | 文件 | 含义 |
 |---|---|
 | `connection.yaml` | 本服务监听 + 多上游供应商列表(default + name → base_url/api_key) + admin 登录 |
-| `strategies.yaml` | 路由策略(single / rule / classifier 三种 kind) |
+| `strategies.yaml` | 路由策略(single / rule / classifier / robust 四种 kind) |
 | `policy.yaml` | 策略链开 + 阈值(anti_downgrade window / LC floor / 等) |
 | `observability.yaml` | **只一项**:`log_dir`(默认 `./log`) |
 | `models.yaml` | 模型注册表(能力元数据,capability_gate 按名查) |

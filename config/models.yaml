@@ -1,27 +1,36 @@
 glm-4.7-flash:
   supports_vision: false
   context_window: 200000
+  upstream: ''
 glm-5.1:
   supports_vision: false
   context_window: 200000
+  upstream: ''
 glm-5.2:
   supports_vision: true
   context_window: 1000000
+  upstream: ''
 kimi-for-coding:
   supports_vision: true
   context_window: 262000
+  upstream: ''
 kimi-k2.6:
   supports_vision: true
   context_window: 262000
+  upstream: ''
 kimi-k2.7-code:
   supports_vision: true
   context_window: 262000
+  upstream: ''
 MiniMax-M2.7:
   supports_vision: false
   context_window: 200000
+  upstream: ''
 MiniMax-M2.7-highspeed:
   supports_vision: false
   context_window: 200000
+  upstream: ''
 MiniMax-M3:
   supports_vision: true
   context_window: 1000000
+  upstream: ''
